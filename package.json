@@ -1,0 +1,24 @@
+{
+  "name": "restroke",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Recover the Drawing Process. 完成画像から描画タイムラプスを推定・生成する",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  }
+}
