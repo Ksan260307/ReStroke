@@ -11,6 +11,8 @@ import { analyzeWorkImage } from '../../src/analysis/pipeline';
 import type { AnalyzeResult } from '../../src/analysis/pipeline';
 import { styleById } from '../../src/strokes/styles';
 import type { StyleProfile } from '../../src/strokes/styles';
+import { qualityFor } from '../../src/analysis/quality';
+import type { QualityLevel } from '../../src/analysis/quality';
 
 export type Painter2D = (x: number, y: number) => [number, number, number];
 
@@ -42,7 +44,7 @@ export function solidImage(w = 96, h = 72, color: [number, number, number] = [20
  * 風景ふうの絵。
  *
  * 空（上下グラデーション）・地面・家（暗い輪郭つき）・太陽・影・ハイライトを含み、
- * 背景／ベース／影／光／線画／細部のすべての工程に材料が行き渡る。
+ * ラフ／線画／ベース／影／光／細部のすべての工程に材料が行き渡る。
  */
 export function sceneImage(w = 320, h = 240): WorkImage {
   const horizon = Math.round(h * 0.62);
@@ -87,8 +89,15 @@ export function noisyImage(w = 240, h = 180): WorkImage {
 export interface PlanOptions {
   style?: string;
   seed?: number;
+  /** 解析の粒度（1-10） */
+  level?: number;
+  /** 本数の上限だけを差し替えたいとき */
   maxStrokes?: number;
-  analysisSide?: number;
+}
+
+export function quality(options: PlanOptions = {}): QualityLevel {
+  const q = qualityFor(options.level ?? 4);
+  return options.maxStrokes ? { ...q, maxStrokes: options.maxStrokes } : q;
 }
 
 export async function buildPlan(
@@ -98,8 +107,7 @@ export async function buildPlan(
   return analyzeWorkImage(work, work.width, work.height, {
     style: styleById(options.style ?? 'professional'),
     seed: options.seed ?? 0x1234abcd,
-    analysisSide: options.analysisSide ?? Math.max(work.width, work.height),
-    maxStrokes: options.maxStrokes ?? 12000,
+    quality: quality(options),
   });
 }
 

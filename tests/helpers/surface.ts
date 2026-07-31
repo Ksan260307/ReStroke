@@ -51,7 +51,13 @@ export class RecordingContext {
   }
 
   fillRect(...a: number[]): void { this.push('fillRect', ...a); }
+  clearRect(...a: number[]): void { this.push('clearRect', ...a); }
   beginPath(): void { this.push('beginPath'); }
+
+  /** 元画像を絵の具にするための模様。実体は不要で、識別できればよい。 */
+  createPattern(image: Surface): { source: Surface; toString(): string } {
+    return { source: image, toString: () => `pattern(${image.width}x${image.height})` };
+  }
   moveTo(...a: number[]): void { this.push('moveTo', ...a); }
   lineTo(...a: number[]): void { this.push('lineTo', ...a); }
   stroke(): void { this.push('stroke'); }

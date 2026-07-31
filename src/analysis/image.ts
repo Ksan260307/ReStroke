@@ -141,6 +141,7 @@ export function boxBlur(src: Uint8Array, w: number, h: number, radius: number): 
 }
 
 const clampIdx = (v: number, n: number): number => (v < 0 ? 0 : v >= n ? n - 1 : v);
+const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 
 export interface EdgeMap {
   width: number;
@@ -154,8 +155,19 @@ export interface EdgeMap {
   threshold: number;
 }
 
-/** 輪郭抽出。線画の下敷きになる。 */
-export function detectEdges(lum: Uint8Array, w: number, h: number, blurRadius = 1): EdgeMap {
+/**
+ * 輪郭抽出。線画の下敷きになる。
+ *
+ * `ratio` は「上位どれだけの画素を線の候補とみなすか」。大きくすると弱い輪郭まで
+ * 拾うので線の本数が増える。
+ */
+export function detectEdges(
+  lum: Uint8Array,
+  w: number,
+  h: number,
+  blurRadius = 1,
+  ratio = 0.07,
+): EdgeMap {
   const src = blurRadius > 0 ? boxBlur(lum, w, h, blurRadius) : lum;
   const mag = new Uint8Array(w * h);
   const gx = new Int16Array(w * h);
@@ -178,15 +190,15 @@ export function detectEdges(lum: Uint8Array, w: number, h: number, blurRadius = 
     }
   }
 
-  // 上位 7% を線候補とする（画像ごとに線の量が違うので比率で決める）。
+  // 画像ごとに輪郭の量が違うので、絶対値ではなく比率で閾値を決める。
   const total = (w - 2) * (h - 2);
-  const target = total * 0.07;
+  const target = total * clamp(ratio, 0.005, 0.9);
   let acc = 0;
   let threshold = 40;
   for (let v = 255; v >= 0; v--) {
     acc += hist[v];
     if (acc >= target) {
-      threshold = Math.max(18, v);
+      threshold = Math.max(6, v);
       break;
     }
   }

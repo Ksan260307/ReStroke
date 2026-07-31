@@ -32,6 +32,8 @@ export interface StyleProfile {
   rough: number;
   /** 細部の密度 0-1 */
   detail: number;
+  /** 仕上げで詰めるときの筆の細かさ（間隔 = spacing × この値） */
+  refine: number;
   /** 手ぶれ */
   jitter: number;
   /** 筆の反り */
@@ -55,9 +57,8 @@ export interface StyleProfile {
   dynamics: DynamicsProfile;
 }
 
-const W = (bg: number, rough: number, line: number, base: number, shadow: number, light: number, detail: number, finish: number): number[] => {
+const W = (rough: number, line: number, base: number, shadow: number, light: number, detail: number, finish: number): number[] => {
   const w = new Array(STAGE_COUNT).fill(0);
-  w[Stage.Background] = bg;
   w[Stage.Rough] = rough;
   w[Stage.LineArt] = line;
   w[Stage.Base] = base;
@@ -86,6 +87,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.72,
     rough: 0.5,
     detail: 0.5,
+    refine: 0.62,
     jitter: 1.9,
     bow: 0.28,
     colorJitter: 0.1,
@@ -97,7 +99,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'source-over',
     paper: 0xfdfcf8,
     speed: 13,
-    stageWeights: W(10, 8, 26, 22, 14, 6, 10, 4),
+    stageWeights: W(14, 26, 16, 9, 5, 9, 21),
     dynamics: dyn({ swayAmplitude: 0.5, pauseChance: 0.009, pauseTicks: 18, fatigueGain: 0.0006 }),
   },
   {
@@ -115,6 +117,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.8,
     rough: 0.4,
     detail: 0.65,
+    refine: 0.55,
     jitter: 1.1,
     bow: 0.22,
     colorJitter: 0.07,
@@ -126,7 +129,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'source-over',
     paper: 0xfdfcfa,
     speed: 16,
-    stageWeights: W(9, 8, 22, 22, 15, 8, 12, 4),
+    stageWeights: W(13, 24, 17, 10, 6, 10, 20),
     dynamics: dyn({ swayAmplitude: 0.38, pauseChance: 0.006 }),
   },
   {
@@ -144,6 +147,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.85,
     rough: 0.55,
     detail: 0.8,
+    refine: 0.5,
     jitter: 0.5,
     bow: 0.3,
     colorJitter: 0.05,
@@ -155,7 +159,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'source-over',
     paper: 0xfcfbf7,
     speed: 22,
-    stageWeights: W(8, 10, 18, 20, 16, 10, 13, 5),
+    stageWeights: W(15, 21, 16, 11, 7, 10, 20),
     dynamics: dyn({ swayAmplitude: 0.28, pauseChance: 0.0035, fatigueGain: 0.00022 }),
   },
   {
@@ -173,6 +177,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.95,
     rough: 0.35,
     detail: 0.7,
+    refine: 0.5,
     jitter: 0.5,
     bow: 0.18,
     colorJitter: 0.03,
@@ -184,7 +189,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'source-over',
     paper: 0xfffffd,
     speed: 24,
-    stageWeights: W(6, 8, 34, 16, 16, 5, 11, 4),
+    stageWeights: W(12, 33, 13, 11, 4, 9, 18),
     dynamics: dyn({ swayAmplitude: 0.24, pauseChance: 0.004 }),
   },
   {
@@ -202,6 +207,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 1,
     rough: 0.25,
     detail: 0.55,
+    refine: 0.55,
     jitter: 0.25,
     bow: 0.1,
     colorJitter: 0.015,
@@ -213,7 +219,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'source-over',
     paper: 0xffffff,
     speed: 26,
-    stageWeights: W(7, 6, 30, 22, 16, 7, 8, 4),
+    stageWeights: W(10, 30, 18, 12, 5, 8, 17),
     dynamics: dyn({ swayAmplitude: 0.2, pauseChance: 0.003, fatigueGain: 0.00018 }),
   },
   {
@@ -231,6 +237,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.45,
     rough: 0.45,
     detail: 0.4,
+    refine: 0.6,
     jitter: 1.6,
     bow: 0.36,
     colorJitter: 0.12,
@@ -242,7 +249,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'multiply',
     paper: 0xfbf8f0,
     speed: 18,
-    stageWeights: W(12, 10, 12, 26, 18, 8, 10, 4),
+    stageWeights: W(16, 16, 20, 12, 6, 8, 22),
     dynamics: dyn({ swayAmplitude: 0.45, pauseChance: 0.007, pauseTicks: 16 }),
   },
   {
@@ -260,6 +267,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.6,
     rough: 0.8,
     detail: 0.9,
+    refine: 0.5,
     jitter: 1.3,
     bow: 0.3,
     colorJitter: 0.14,
@@ -271,7 +279,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'source-over',
     paper: 0x8d8880,
     speed: 19,
-    stageWeights: W(12, 16, 0, 24, 18, 12, 14, 4),
+    stageWeights: W(24, 0, 22, 14, 8, 10, 22),
     dynamics: dyn({ swayAmplitude: 0.4, pauseChance: 0.005 }),
   },
   {
@@ -289,6 +297,7 @@ export const STYLES: StyleProfile[] = [
     lineOpacity: 0.6,
     rough: 0.3,
     detail: 0.6,
+    refine: 0.75,
     jitter: 0.9,
     bow: 0.2,
     colorJitter: 0.09,
@@ -300,7 +309,7 @@ export const STYLES: StyleProfile[] = [
     inkComposite: 'multiply',
     paper: 0xfcfaf4,
     speed: 15,
-    stageWeights: W(10, 8, 18, 26, 16, 8, 10, 4),
+    stageWeights: W(12, 20, 20, 11, 6, 10, 21),
     dynamics: dyn({ swayAmplitude: 0.34, pauseChance: 0.006 }),
   },
 ];

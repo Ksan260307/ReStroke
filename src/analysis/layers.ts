@@ -4,8 +4,7 @@
  * 1 枚の完成画像には「どれを先に塗ったか」の情報が残っていない。そこで、面積・
  * 明るさ・画面端に接しているかといった手がかりから、各領域を工程へ割り当てる。
  *
- *   広くて画面端に接する    → 背景
- *   広くて中間の明るさ      → ベースカラー
+ *   広い                    → ベースカラー（背景にあたる面もここ）
  *   狭くて暗い              → 影
  *   狭くて明るい            → 光
  *   小さい                  → 細部
@@ -78,8 +77,8 @@ export function estimateLayers(
   const classify = (r: Region): number => {
     const cov = r.area / total;
     const L = lumOf(palette[r.color]);
-    if (r.touchesBorder && cov > 0.025) return Stage.Background;
-    if (cov > 0.10) return Stage.Background;
+    // 広い面は、画面端に接していてもいなくてもベースカラーとして扱う。
+    // 背景を独立した工程にせず、着色の一部として最初に置く。
     if (cov > 0.010) return Stage.Base;
     if (L < meanLum - 16) return Stage.Shadow;
     if (L > meanLum + 20) return Stage.Light;

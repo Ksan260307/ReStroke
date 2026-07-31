@@ -7,7 +7,7 @@ import {
   TRANSITION_VERSION,
 } from '../../src/core/schema';
 import { STYLES, styleById } from '../../src/strokes/styles';
-import { buildPlan, noisyImage, sceneImage, solidImage } from '../helpers/fixtures';
+import { buildPlan, noisyImage, quality, sceneImage, solidImage } from '../helpers/fixtures';
 
 describe('解析パイプライン', () => {
   it('画像から工程一式を組み立てる', async () => {
@@ -35,8 +35,7 @@ describe('解析パイプライン', () => {
     await analyzeWorkImage(sceneImage(160, 120), 160, 120, {
       style: styleById('professional'),
       seed: 1,
-      analysisSide: 160,
-      maxStrokes: 5000,
+      quality: quality({ level: 4, maxStrokes: 5000 }),
       onProgress: (phase, ratio) => phases.push([phase, ratio]),
     });
     expect(phases.length).toBeGreaterThan(4);
@@ -75,7 +74,7 @@ describe('解析パイプライン', () => {
   it('元画像の大きさを記録する', async () => {
     const img = sceneImage(200, 150);
     const r = await analyzeWorkImage(img, 4000, 3000, {
-      style: styleById('anime'), seed: 3, analysisSide: 200, maxStrokes: 6000,
+      style: styleById('anime'), seed: 3, quality: quality({ level: 4, maxStrokes: 6000 }),
     });
     expect(r.plan.sourceWidth).toBe(4000);
     expect(r.plan.sourceHeight).toBe(3000);

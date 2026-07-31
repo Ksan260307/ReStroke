@@ -60,12 +60,21 @@ describe('描画', () => {
     expect(p.height).toBe(160);
   });
 
-  it('初期化で紙の色に塗る', () => {
+  it('描画面は透明で始まる（紙は表示時に敷く）', () => {
     const p = new Painter(makePlan(), options());
-    const fills = ctxOf(p).calls.filter((c) => c.op === 'fillRect');
+    const ctx = ctxOf(p);
+    expect(ctx.calls.filter((c) => c.op === 'fillRect')).toHaveLength(0);
+    expect(ctx.calls.filter((c) => c.op === 'clearRect')).toHaveLength(1);
+
+    const dest = handle.surfaces[0].ctx;
+    dest.calls = [];
+    p.present(dest as unknown as CanvasRenderingContext2D, 100, 80);
+    const fills = dest.calls.filter((c) => c.op === 'fillRect');
     expect(fills).toHaveLength(1);
     expect(fills[0].state.fillStyle).toBe(cssColor(PAPER, 1));
-    expect(fills[0].args).toEqual([0, 0, 100, 80]);
+    // 紙を敷いてから筆致を重ねる
+    expect(dest.calls.findIndex((c) => c.op === 'fillRect'))
+      .toBeLessThan(dest.calls.findIndex((c) => c.op === 'drawImage'));
   });
 
   it('命令の順に、色と不透明度どおりに筆を置く', () => {
@@ -167,78 +176,79 @@ describe('描画', () => {
   });
 });
 
-describe('元画像への収束', () => {
+describe('下塗りと詰め', () => {
   const source = { fake: 'source' } as unknown as CanvasImageSource;
 
-  it('元画像が無ければ収束しない', () => {
-    const p = new Painter(makePlan(), options());
-    p.convergence = 1;
-    expect(p.effectiveConvergence).toBe(0);
+  it('下塗りは既にある線の下へ潜り込ませる', () => {
+    const p = new Painter(makePlan(Brush.Under), options());
+    ctxOf(p).drain();
+    p.apply(opsFor([0]), null);
+    const stroke = ctxOf(p).calls.find((c) => c.op === 'stroke')!;
+    expect(stroke.state.composite).toBe('destination-over');
   });
 
-  it('重ね具合 0 では筆致だけを写す', () => {
-    const p = new Painter(makePlan(), options({ source }));
-    const dest = handle.surfaces[0].ctx;
-    dest.calls = [];
-    p.convergence = 0;
-    p.present(dest as unknown as CanvasRenderingContext2D, 100, 80);
-    const draws = dest.calls.filter((c) => c.op === 'drawImage');
-    expect(draws).toHaveLength(1);
+  it('詰めの筆は元画像を絵の具にする', () => {
+    const p = new Painter(makePlan(Brush.Refine), options({ source }));
+    expect(p.hasSource).toBe(true);
+    ctxOf(p).drain();
+    p.apply(opsFor([0]), null);
+    const stroke = ctxOf(p).calls.find((c) => c.op === 'stroke')!;
+    expect(stroke.state.composite).toBe('source-over');
+    // 単色ではなく模様（元画像）で塗っている
+    expect(stroke.state.strokeStyle).toContain('pattern');
+    expect(stroke.state.globalAlpha).toBeCloseTo(128 / 255, 5);
   });
 
-  it('重ね具合に応じて元画像を重ねる', () => {
-    const p = new Painter(makePlan(), options({ source }));
-    const dest = handle.surfaces[0].ctx;
-    dest.calls = [];
-    p.convergence = 0.4;
-    p.present(dest as unknown as CanvasRenderingContext2D, 100, 80);
-    const draws = dest.calls.filter((c) => c.op === 'drawImage');
-    expect(draws).toHaveLength(2);
-    expect(draws[0].state.globalAlpha).toBe(1);
-    expect(draws[1].state.globalAlpha).toBeCloseTo(0.4, 6);
+  it('元画像が無ければ拾った色で代用する', () => {
+    const p = new Painter(makePlan(Brush.Refine), options());
+    expect(p.hasSource).toBe(false);
+    ctxOf(p).drain();
+    p.apply(opsFor([0]), null);
+    const stroke = ctxOf(p).calls.find((c) => c.op === 'stroke')!;
+    expect(stroke.state.strokeStyle).toBe(cssColor(rgb(200, 40, 60), 128 / 255));
   });
 
-  it('重ね具合 1 では元画像そのものになる', () => {
-    const p = new Painter(makePlan(), options({ source }));
-    const dest = handle.surfaces[0].ctx;
-    dest.calls = [];
-    p.convergence = 1;
-    p.present(dest as unknown as CanvasRenderingContext2D, 100, 80);
-    const draws = dest.calls.filter((c) => c.op === 'drawImage');
-    expect(draws[draws.length - 1].state.globalAlpha).toBe(1);
-    // 最後に描かれるのは元画像
-    expect(draws[draws.length - 1].args[0]).not.toBe(p.canvas);
+  it('詰めの筆は引き終わるまで置かれず、置くときは一筆で通す', () => {
+    const p = new Painter(makePlan(Brush.Refine), options({ source }));
+    ctxOf(p).drain();
+    // 途中の区間では何も置かない
+    p.apply(opsFor([0], 0, 0.4), null);
+    p.apply(opsFor([0], 0.4, 0.8), null);
+    expect(ctxOf(p).calls.filter((c) => c.op === 'stroke')).toHaveLength(0);
+
+    // 引き終わった時点で、始点から終点までを一度に置く
+    p.apply(opsFor([0], 0.8, 1), null);
+    const calls = ctxOf(p).calls;
+    expect(calls.filter((c) => c.op === 'stroke')).toHaveLength(1);
+    const move = calls.find((c) => c.op === 'moveTo')!.args as number[];
+    const lines = calls.filter((c) => c.op === 'lineTo');
+    const last = lines[lines.length - 1].args as number[];
+    expect(move[0]).toBeCloseTo(10, 5); // 始点
+    expect(last[0]).toBeCloseTo(50, 5); // 終点
   });
 
-  it('範囲外の値は 0-1 に丸める', () => {
-    const p = new Painter(makePlan(), options({ source }));
-    p.convergence = 5;
-    expect(p.effectiveConvergence).toBe(1);
-    p.convergence = -2;
-    expect(p.effectiveConvergence).toBe(0);
+  it('画風が乗算でも詰めは上書きになる', () => {
+    const p = new Painter(makePlan(Brush.Refine), options({ source, fillComposite: 'multiply', inkComposite: 'multiply' }));
+    ctxOf(p).drain();
+    p.apply(opsFor([0]), null);
+    expect(ctxOf(p).calls.find((c) => c.op === 'stroke')!.state.composite).toBe('source-over');
   });
 
-  it('無効にすれば重ねない', () => {
+  it('書き出し用の面には紙が敷かれる', () => {
     const p = new Painter(makePlan(), options({ source }));
-    p.convergence = 1;
-    p.convergenceEnabled = false;
-    expect(p.effectiveConvergence).toBe(0);
+    const out = p.output();
+    expect(out).not.toBe(p.canvas);
+    const ctx = out.getContext() as RecordingContext;
+    expect(ctx.calls.filter((c) => c.op === 'fillRect')).toHaveLength(1);
+    expect(ctx.calls.filter((c) => c.op === 'drawImage')).toHaveLength(1);
   });
 
-  it('書き出し用の面は収束を含む', () => {
+  it('縮小して取り出すときも紙が敷かれる', () => {
     const p = new Painter(makePlan(), options({ source }));
-    p.convergence = 0;
-    expect(p.output()).toBe(p.canvas);
-    p.convergence = 0.5;
-    expect(p.output()).not.toBe(p.canvas);
-  });
-
-  it('縮小して取り出すときも収束を含む', () => {
-    const p = new Painter(makePlan(), options({ source }));
-    p.convergence = 0.5;
     const data = p.readScaled(50, 40);
     expect(data.data.length).toBe(50 * 40 * 4);
     const scratch = handle.surfaces[handle.surfaces.length - 1].ctx;
-    expect(scratch.calls.filter((c) => c.op === 'drawImage')).toHaveLength(2);
+    expect(scratch.calls.filter((c) => c.op === 'fillRect')).toHaveLength(1);
+    expect(scratch.calls.filter((c) => c.op === 'drawImage')).toHaveLength(1);
   });
 });

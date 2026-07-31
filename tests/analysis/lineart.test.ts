@@ -80,6 +80,21 @@ describe('線画の抽出', () => {
     }
   });
 
+  it('確保する幅を狭めると線の本数が増える', () => {
+    const img = sceneImage(240, 180);
+    const edges = detectEdges(img.lum, img.width, img.height, 1, 0.2);
+    const wide = traceLines(edges, { minLength: 4, claimRadius: 1 });
+    const narrow = traceLines(edges, { minLength: 4, claimRadius: 0 });
+    expect(narrow.length).toBeGreaterThan(wide.length);
+  });
+
+  it('拾う割合を上げると線の本数が増える', () => {
+    const img = sceneImage(240, 180);
+    const few = traceLines(detectEdges(img.lum, img.width, img.height, 1, 0.05), { minLength: 4 });
+    const many = traceLines(detectEdges(img.lum, img.width, img.height, 1, 0.3), { minLength: 4 });
+    expect(many.length).toBeGreaterThan(few.length);
+  });
+
   it('同じ輪郭を何度もなぞらない', () => {
     const img = singleLine(160, 120);
     const edges = detectEdges(img.lum, img.width, img.height, 0);

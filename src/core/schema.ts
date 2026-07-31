@@ -13,24 +13,28 @@ export const SCHEMA_VERSION = 'stroke-plan/1.0';
 export const TRANSITION_VERSION = 'paint-transition/1.0';
 export const DYNAMICS_VERSION = 'paint-dynamics/1.0';
 
-/** 描画工程。並び順がそのまま制作順になる。 */
+/**
+ * 描画工程。並び順がそのまま制作順になる。
+ *
+ * ラフで全体の当たりと色を置き、線画で形を決め、着色（ベース→影→光→細部）で
+ * 色を積み、仕上げで詰める。背景を独立した工程には置かない。広い面も 1 つの
+ * 色の領域として、ラフの色置きとベースカラーが引き受ける。
+ */
 export const Stage = {
-  Background: 0,
-  Rough: 1,
-  LineArt: 2,
-  Base: 3,
-  Shadow: 4,
-  Light: 5,
-  Detail: 6,
-  Finish: 7,
+  Rough: 0,
+  LineArt: 1,
+  Base: 2,
+  Shadow: 3,
+  Light: 4,
+  Detail: 5,
+  Finish: 6,
 } as const;
 
 export type StageId = (typeof Stage)[keyof typeof Stage];
 
-export const STAGE_COUNT = 8;
+export const STAGE_COUNT = 7;
 
 export const STAGE_LABELS: Record<number, string> = {
-  [Stage.Background]: '背景',
   [Stage.Rough]: 'ラフ',
   [Stage.LineArt]: '線画',
   [Stage.Base]: 'ベースカラー',
@@ -40,12 +44,19 @@ export const STAGE_LABELS: Record<number, string> = {
   [Stage.Finish]: '仕上げ',
 };
 
+/** 着色にあたる工程（画面上のまとまりとして扱う）。 */
+export const COLORING_STAGES: number[] = [Stage.Base, Stage.Shadow, Stage.Light, Stage.Detail];
+
 /** ブラシの種類。描画時の合成方法と筆致に対応する。 */
 export const Brush = {
   Flat: 0, // 平筆（面を塗る）
   Round: 1, // 丸筆（線を引く）
   Soft: 2, // ぼかし（影・光）
   Grain: 3, // かすれ（鉛筆・水彩の縁）
+  /** 詰め。元画像そのものを絵の具として置く（仕上げ） */
+  Refine: 4,
+  /** 下塗り。すでに置かれた線の下へ潜り込ませる */
+  Under: 5,
 } as const;
 
 export type BrushId = (typeof Brush)[keyof typeof Brush];

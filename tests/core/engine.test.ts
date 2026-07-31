@@ -73,14 +73,12 @@ describe('時間配分', () => {
     expect(manga.stageTicks[Stage.LineArt]).toBeGreaterThan(water.stageTicks[Stage.LineArt]);
   });
 
-  it('収束区間は終盤に置かれ、長さに応じて伸び縮みする', () => {
-    for (const sec of [3, 10, 60, 600]) {
-      const p = buildSimParams(plan, style('professional'), sec, 60, 1);
-      expect(p.convergeStart).toBeGreaterThanOrEqual(0);
-      expect(p.convergeStart).toBeLessThan(p.totalTicks);
-      const span = p.totalTicks - p.convergeStart;
-      expect(span).toBeGreaterThanOrEqual(Math.min(15, p.totalTicks));
-      expect(span).toBeLessThanOrEqual(180);
+  it('1 つの工程が時間を占めすぎない', () => {
+    for (const id of ['professional', 'manga', 'pencil', 'impasto']) {
+      const p = buildSimParams(plan, style(id), 30, 60, 1);
+      for (let s = 0; s < STAGE_COUNT; s++) {
+        expect(p.stageTicks[s] / p.totalTicks, `${id} の工程 ${s}`).toBeLessThanOrEqual(0.36);
+      }
     }
   });
 });
@@ -195,65 +193,27 @@ describe('再生エンジン', () => {
   });
 });
 
-describe('元画像への収束（エンジン）', () => {
-  it('収束が始まるまでは 0、最後はちょうど 1', () => {
-    const e = makeEngine();
-    expect(e.convergenceAt(0)).toBe(0);
-    expect(e.convergenceAt(e.params.convergeStart)).toBe(0);
-    expect(e.convergenceAt(e.totalTicks)).toBe(1);
-    expect(e.convergenceAt(e.totalTicks + 100)).toBe(1);
-  });
-
-  it('収束は単調に増える', () => {
-    const e = makeEngine();
-    let prev = -1;
-    for (let t = 0; t <= e.totalTicks; t++) {
-      const v = e.convergenceAt(t);
-      expect(v).toBeGreaterThanOrEqual(prev);
-      expect(v).toBeLessThanOrEqual(1);
-      prev = v;
-    }
-  });
-
-  it('どの尺でも最後の tick で 1 になる', async () => {
-    for (const sec of [3, 10, 30, 60, 300]) {
-      const e = makeEngine({ durationSec: sec });
-      e.advance(e.totalTicks);
-      expect(e.painter.convergence, `${sec} 秒`).toBe(1);
-      expect(e.painter.effectiveConvergence).toBe(1);
-      expect(e.state.cursor).toBe(plan.strokes.count);
-    }
-  });
-
-  it('位置を移動すると重ね具合も追従する', () => {
-    const e = makeEngine();
-    e.advanceTo(e.totalTicks);
-    expect(e.painter.convergence).toBe(1);
-    e.advanceTo(0);
-    expect(e.painter.convergence).toBe(0);
-    e.advanceTo(e.params.convergeStart + 1);
-    expect(e.painter.convergence).toBeGreaterThan(0);
-    expect(e.painter.convergence).toBeLessThan(1);
-  });
-
-  it('レイヤーを隠している間は収束しない', () => {
+describe('レイヤーの表示', () => {
+  it('隠したレイヤーの筆致は描かれない', () => {
     const e = makeEngine();
     const hidden = new Uint8Array(plan.layers.length + 1).fill(1);
-    hidden[0] = 0;
+    hidden[plan.layers[0].id] = 0;
     e.setVisibility(hidden);
     e.advanceTo(e.totalTicks);
-    expect(e.painter.effectiveConvergence).toBe(0);
-    e.setVisibility(null);
-    e.advanceTo(e.totalTicks);
-    expect(e.painter.effectiveConvergence).toBe(1);
+    expect(e.tick).toBe(e.totalTicks);
+    // 状態そのものは表示に左右されない
+    const shown = makeEngine();
+    shown.advanceTo(shown.totalTicks);
+    expect(e.state).toEqual(shown.state);
   });
 
-  it('全レイヤーを表示に戻せば収束する', () => {
+  it('表示を戻せる', () => {
     const e = makeEngine();
     const all = new Uint8Array(plan.layers.length + 1).fill(1);
     e.setVisibility(all);
+    e.setVisibility(null);
     e.advanceTo(e.totalTicks);
-    expect(e.painter.effectiveConvergence).toBe(1);
+    expect(e.state.cursor).toBe(plan.strokes.count);
   });
 });
 
@@ -267,6 +227,5 @@ describe('極端な入力', () => {
     e.advance(e.totalTicks);
     expect(e.finished).toBe(true);
     expect(e.state.cursor).toBe(simple.strokes.count);
-    expect(e.painter.convergence).toBe(1);
   });
 });

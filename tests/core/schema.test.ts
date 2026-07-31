@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   Brush,
+  COLORING_STAGES,
   DYNAMICS_VERSION,
   SCHEMA_VERSION,
   STAGE_COUNT,
@@ -28,13 +29,28 @@ const sample = {
 describe('論理スキーマ', () => {
   it('工程はすべて名前を持ち、順番が制作順になっている', () => {
     expect(Object.keys(STAGE_LABELS)).toHaveLength(STAGE_COUNT);
-    expect(Stage.Background).toBeLessThan(Stage.Rough);
+    expect(Stage.Rough).toBe(0);
     expect(Stage.Rough).toBeLessThan(Stage.LineArt);
     expect(Stage.LineArt).toBeLessThan(Stage.Base);
     expect(Stage.Base).toBeLessThan(Stage.Shadow);
     expect(Stage.Shadow).toBeLessThan(Stage.Light);
     expect(Stage.Light).toBeLessThan(Stage.Detail);
     expect(Stage.Detail).toBeLessThan(Stage.Finish);
+    expect(Stage.Finish).toBe(STAGE_COUNT - 1);
+  });
+
+  it('背景は独立した工程を持たない（着色に吸収されている）', () => {
+    expect(Object.values(STAGE_LABELS)).not.toContain('背景');
+    expect(Object.values(STAGE_LABELS)).toEqual([
+      'ラフ', '線画', 'ベースカラー', '影', '光', '細部', '仕上げ',
+    ]);
+  });
+
+  it('着色にあたる工程は線画のあと、仕上げの前にある', () => {
+    for (const s of COLORING_STAGES) {
+      expect(s).toBeGreaterThan(Stage.LineArt);
+      expect(s).toBeLessThan(Stage.Finish);
+    }
   });
 
   it('ストロークを追加すると全フィールドが保存される', () => {

@@ -124,29 +124,8 @@ export class TimelapseEngine {
     return this.params.totalTicks === 0 ? 1 : this.state.tick / this.params.totalTicks;
   }
 
-  /**
-   * 元画像の重ね具合。
-   *
-   * 終盤にかけて 0 から 1 へ上げ、最後の tick でちょうど 1 になる。tick だけで
-   * 決まるので、プレビューでも書き出しでも同じフレームには同じ値が使われる。
-   */
-  convergenceAt(tick: number): number {
-    const { convergeStart, totalTicks } = this.params;
-    if (tick >= totalTicks) return 1;
-    if (tick <= convergeStart || totalTicks <= convergeStart) return 0;
-    const u = (tick - convergeStart) / (totalTicks - convergeStart);
-    return u * u * (3 - 2 * u);
-  }
-
-  private syncConvergence(): void {
-    this.painter.convergence = this.convergenceAt(this.state.tick);
-  }
-
   setVisibility(v: Uint8Array | null): void {
     this.visibility = v;
-    // 一部のレイヤーを隠しているときは、選んだものだけを見せたいはずなので
-    // 元画像への収束は行わない。
-    this.painter.convergenceEnabled = v === null || v.every((x) => x === 1);
     const target = this.state.tick;
     this.dropCache();
     this.rewind();
@@ -157,7 +136,6 @@ export class TimelapseEngine {
   rewind(): void {
     resetSimState(this.state);
     this.painter.clear();
-    this.syncConvergence();
   }
 
   /** キャッシュを捨てる（正しさには影響しない）。 */
@@ -170,7 +148,6 @@ export class TimelapseEngine {
     for (let i = 0; i < n && this.state.tick < this.params.totalTicks; i++) {
       this.stepOnce();
     }
-    this.syncConvergence();
   }
 
   /** 指定 tick へ移動する。戻る場合はキャッシュから計算し直す。 */
@@ -187,7 +164,6 @@ export class TimelapseEngine {
       }
     }
     while (this.state.tick < t) this.stepOnce();
-    this.syncConvergence();
   }
 
   private stepOnce(): void {
@@ -263,12 +239,30 @@ export function buildSimParams(
   for (let s = 0; s < STAGE_COUNT; s++) {
     if (counts[s] <= 0) continue;
     const share = totalStrokes > 0 ? counts[s] / totalStrokes : 0;
-    weights[s] = style.stageWeights[s] * 0.65 + share * 100 * 0.35;
+    // 画風が決めた配分と、実際の本数の比を折衷する。本数の多い工程が
+    // 一瞬で流れてしまわないよう、本数側の重みを小さくしすぎない。
+    weights[s] = style.stageWeights[s] * 0.55 + share * 100 * 0.45;
     sum += weights[s];
   }
   if (sum <= 0) {
     weights[Stage.Base] = 1;
     sum = 1;
+  }
+
+  // 1 つの工程が時間を占めすぎないようにする。仕上げの詰めは本数が桁違いに多く、
+  // 放っておくと動画の大半が詰め作業になってしまう。
+  const CAP = 0.34;
+  for (let pass = 0; pass < 4; pass++) {
+    let over = false;
+    for (let s = 0; s < STAGE_COUNT; s++) {
+      const limit = sum * CAP;
+      if (weights[s] > limit) {
+        sum -= weights[s] - limit;
+        weights[s] = limit;
+        over = true;
+      }
+    }
+    if (!over) break;
   }
 
   const stageTicks = new Int32Array(STAGE_COUNT);
@@ -282,8 +276,13 @@ export function buildSimParams(
     assigned += t;
     lastUsed = s;
   }
+  if (lastUsed < 0) {
+    stageTicks[Stage.Base] = totalTicks;
+    lastUsed = Stage.Base;
+    assigned = totalTicks;
+  }
   // 端数は最後の工程へ寄せる（合計が指定尺と必ず一致するように）。
-  if (lastUsed >= 0) stageTicks[lastUsed] += totalTicks - assigned;
+  stageTicks[lastUsed] += totalTicks - assigned;
 
   let acc = 0;
   for (let s = 0; s < STAGE_COUNT; s++) {
@@ -292,18 +291,13 @@ export function buildSimParams(
   }
 
   const stageIntensity = new Float32Array(STAGE_COUNT);
-  stageIntensity[Stage.Background] = 0.7;
   stageIntensity[Stage.Rough] = 1.2;
   stageIntensity[Stage.LineArt] = 1.35;
   stageIntensity[Stage.Base] = 0.8;
   stageIntensity[Stage.Shadow] = 1;
   stageIntensity[Stage.Light] = 1.1;
   stageIntensity[Stage.Detail] = 1.4;
-  stageIntensity[Stage.Finish] = 1.15;
-
-  // 終盤で元画像へ寄せていく区間。長さに関わらず、最後は必ず元画像そのものになる。
-  const convergeTicks = Math.min(Math.max(Math.round(totalTicks * 0.08), 15), 180, totalTicks);
-  const convergeStart = Math.max(0, totalTicks - convergeTicks);
+  stageIntensity[Stage.Finish] = 1.25;
 
   return {
     seed,
@@ -313,6 +307,5 @@ export function buildSimParams(
     stageTicks,
     stageStart,
     stageIntensity,
-    convergeStart,
   };
 }

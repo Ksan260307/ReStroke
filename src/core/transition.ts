@@ -28,8 +28,6 @@ export interface SimParams {
   stageStart: Int32Array;
   /** 工程ごとの筆の乗りやすさ */
   stageIntensity: Float32Array;
-  /** 元画像へ収束させ始める tick */
-  convergeStart: number;
 }
 
 /** 確定状態。これだけで任意時点の絵が再現できる。 */

@@ -18,15 +18,14 @@ import { generateStrokes } from '../strokes/generator';
 import type { StyleProfile } from '../strokes/styles';
 import { STAGE_COUNT, baseIdentity } from '../core/schema';
 import type { DrawingPlan, LayerInfo } from '../core/schema';
+import type { QualityLevel } from './quality';
 import { yieldToUI } from '../core/scheduling';
 
 export interface AnalyzeOptions {
   style: StyleProfile;
   seed: number;
-  /** 解析解像度（長辺） */
-  analysisSide: number;
-  /** ストローク本数の上限 */
-  maxStrokes: number;
+  /** 解析の粒度 */
+  quality: QualityLevel;
   onProgress?: (phase: string, ratio: number) => void;
 }
 
@@ -50,7 +49,7 @@ export async function analyze(
 ): Promise<AnalyzeResult> {
   options.onProgress?.('画像を読み込んでいます', 0.04);
   await yieldToUI();
-  const work = toWorkImage(bitmap, options.analysisSide);
+  const work = toWorkImage(bitmap, options.quality.analysisSide);
   return analyzeWorkImage(work, bitmap.width, bitmap.height, options);
 }
 
@@ -66,7 +65,7 @@ export async function analyzeWorkImage(
   options: AnalyzeOptions,
 ): Promise<AnalyzeResult> {
   const t0 = performance.now();
-  const { style, seed } = options;
+  const { style, seed, quality } = options;
   const report = async (phase: string, ratio: number): Promise<void> => {
     options.onProgress?.(phase, ratio);
     await yieldToUI();
@@ -75,25 +74,29 @@ export async function analyzeWorkImage(
   const { meanLum } = imageStats(work);
 
   await report('輪郭を抽出しています', 0.18);
-  const edges = detectEdges(work.lum, work.width, work.height, 1);
+  const edges = detectEdges(work.lum, work.width, work.height, 1, quality.edgeRatio);
 
   await report('色を解析しています', 0.34);
-  const color = quantize(work.smooth, work.width, work.height, style.paletteSize);
+  const palette = Math.max(4, Math.round(style.paletteSize * quality.paletteScale));
+  const color = quantize(work.smooth, work.width, work.height, palette);
 
   await report('領域を分割しています', 0.5);
-  const minArea = Math.max(12, Math.round((work.width * work.height) / 9000));
+  const minArea = Math.max(
+    8,
+    Math.round((work.width * work.height) / (9000 * (0.6 + quality.detailScale * 0.7))),
+  );
   const seg = segment(color.index, work.lum, work.width, work.height, minArea);
 
   await report('レイヤーを推定しています', 0.64);
   const assign = estimateLayers(seg, color.palette, meanLum, minArea);
 
   await report('描画順を推定しています', 0.74);
-  const lines = style.lineArt || style.rough > 0.02
-    ? traceLines(edges, {
-        minLength: Math.max(5, style.spacing * 0.9),
-        maxLines: 6000,
-      })
-    : [];
+  // 線画は工程の主役なので、短い線も拾って本数を確保する。
+  const lines = traceLines(edges, {
+    minLength: Math.max(2.5, style.spacing * quality.lineMinLength),
+    maxLines: Math.max(2000, Math.round(quality.maxStrokes * 0.6)),
+    claimRadius: quality.claimRadius,
+  });
 
   await report('ストロークを生成しています', 0.84);
   const generated = generateStrokes({
@@ -105,7 +108,7 @@ export async function analyzeWorkImage(
     lines,
     style,
     seed,
-    maxStrokes: options.maxStrokes,
+    quality,
     minArea,
   });
 
@@ -123,8 +126,8 @@ export async function analyzeWorkImage(
   const params = [
     style.id,
     seed.toString(16),
-    options.analysisSide,
-    options.maxStrokes,
+    quality.level,
+    quality.analysisSide,
     generated.spacing.toFixed(3),
     st.count,
   ].join(':');

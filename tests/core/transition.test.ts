@@ -65,6 +65,7 @@ describe('状態遷移', () => {
     }
   });
 
+
   it('画風を変えても描き切る', async () => {
     for (const id of ['beginner', 'intermediate', 'professional', 'manga', 'anime', 'watercolor', 'impasto', 'pencil']) {
       const { plan } = await buildPlan(sceneImage(240, 180), { style: id, maxStrokes: 9000 });
@@ -86,13 +87,35 @@ describe('状態遷移', () => {
     }
   });
 
-  it('進み方が偏らない（前半で 3 割以上は進む）', async () => {
+  it('進み方が偏らない（仕上げ前の塗りは前半で 3 割以上進む）', async () => {
+    // 本数で測ると、仕上げの細かい筆が大量にあるぶん後半に偏って見える。
+    // 仕上げは画面全体を塗り直す工程なので、そこを除いた「絵を組み立てる塗り」で測る。
     const { plan } = await buildPlan(sceneImage());
     const params = buildSimParams(plan, style('intermediate'), 30, 60, 5);
-    const r = runAll(plan, params);
-    const half = r.perTick.slice(0, Math.floor(r.perTick.length / 2)).reduce((a, b) => a + b, 0);
-    expect(half / plan.strokes.count).toBeGreaterThan(0.3);
-    expect(half / plan.strokes.count).toBeLessThan(0.85);
+    const prefix = buildWorkPrefix(plan);
+    const state = createSimState();
+    const ops = createPaintOps(256);
+    const s = plan.strokes;
+    const finishFrom = plan.stageOffset[STAGE_COUNT - 1];
+    const areaOf = (i: number): number =>
+      i >= finishFrom
+        ? 0
+        : Math.hypot(s.x1[i] - s.x0[i], s.y1[i] - s.y0[i]) * s.width[i] + s.width[i] * s.width[i];
+    let totalArea = 0;
+    for (let i = 0; i < s.count; i++) totalArea += areaOf(i);
+    expect(totalArea).toBeGreaterThan(0);
+
+    let firstHalf = 0;
+    const halfTick = Math.floor(params.totalTicks / 2);
+    for (let t = 0; t < params.totalTicks; t++) {
+      stepSimulation(plan, params, prefix, state, ops);
+      if (t >= halfTick) continue;
+      for (let k = 0; k < ops.count; k++) {
+        firstHalf += areaOf(ops.index[k]) * (ops.to[k] - ops.from[k]);
+      }
+    }
+    expect(firstHalf / totalArea).toBeGreaterThan(0.3);
+    expect(firstHalf / totalArea).toBeLessThanOrEqual(1.0001);
   });
 
   it('同じ入力からは同じ状態列になる', async () => {

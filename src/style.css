@@ -220,6 +220,11 @@ h1 {
 
 .sub { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
 
+.quality-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.quality-head b { color: var(--accent); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+#quality-input { width: 100%; accent-color: var(--accent); margin: 2px 0 0; }
+#quality-note { margin-top: 6px; font-variant-numeric: tabular-nums; }
+
 input[type="text"], input[type="number"], select {
   background: var(--bg-soft);
   border: 1px solid var(--line);

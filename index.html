@@ -16,8 +16,8 @@
         <p class="lead">
           完成した画像を解析し、人の手で描いたときの工程を推定してタイムラプスにします。
           実際の制作過程を復元するものではなく、自然な制作過程を組み立てて再現します。
-          終盤では筆致を元画像へなじませ、<strong>長さの設定にかかわらず最後のフレームは
-          元画像と完全に一致</strong>します。
+          仕上げでは元画像そのものを絵の具として筆を運ぶため、<strong>長さの設定にかかわらず
+          最後のフレームは元画像と完全に一致</strong>します。
         </p>
       </header>
 
@@ -64,6 +64,17 @@
             </label>
           </div>
 
+          <div class="field">
+            <label class="sub" for="quality-input">
+              <span class="quality-head">
+                解析の粒度
+                <b id="quality-level">レベル 6</b>
+              </span>
+            </label>
+            <input type="range" id="quality-input" min="1" max="10" step="1" value="6" />
+            <p class="note" id="quality-note"></p>
+          </div>
+
           <div class="field grid-2">
             <label class="sub">
               <span>フレームレート</span>
@@ -78,14 +89,6 @@
                 <option value="720">720 px</option>
                 <option value="1080" selected>1080 px</option>
                 <option value="1440">1440 px</option>
-              </select>
-            </label>
-            <label class="sub">
-              <span>筆致の細かさ</span>
-              <select id="detail-select">
-                <option value="8000">粗い（軽い）</option>
-                <option value="18000" selected>標準</option>
-                <option value="36000">細かい（重い）</option>
               </select>
             </label>
             <label class="sub">
@@ -136,8 +139,8 @@
               <h3>推定されたレイヤー</h3>
               <ul class="layers" id="layer-list"></ul>
               <p class="note">
-                チェックを外すとその筆致を隠して再生します。隠している間は、
-                終盤で元画像へ寄せる処理を行いません。
+                チェックを外すとその筆致を隠して再生します。
+                「仕上げ」を外すと、詰める前の筆致だけを見られます。
               </p>
             </div>
             <div class="card">

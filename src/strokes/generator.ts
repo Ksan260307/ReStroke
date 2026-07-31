@@ -18,6 +18,7 @@ import type { Segmentation, Region } from '../analysis/segment';
 import type { LayerAssignment } from '../analysis/layers';
 import type { Polyline } from '../analysis/lineart';
 import type { StyleProfile } from './styles';
+import type { QualityLevel } from '../analysis/quality';
 import { Brush, Stage, STAGE_COUNT, createStrokeTable, pushStroke, rgb } from '../core/schema';
 import type { StrokeTable } from '../core/schema';
 import { clamp, rand01, randSigned } from '../core/rng';
@@ -31,7 +32,8 @@ export interface GenerateInput {
   lines: Polyline[];
   style: StyleProfile;
   seed: number;
-  maxStrokes: number;
+  /** 解析の粒度 */
+  quality: QualityLevel;
   /** 塗りの対象とする最小面積（これ未満は領域として扱われていない） */
   minArea: number;
 }
@@ -47,9 +49,20 @@ export interface GenerateResult {
 
 const MAX_REGIONS_PER_STAGE = 1400;
 
+/**
+ * 最後の一撫でで使う筆の間隔（画像座標系）。
+ *
+ * 出力解像度でおよそ 25px 以上の幅になるようにしてある。これより細いと、筆の縁の
+ * ぼかしが丸め誤差として残り、元画像と最後まで一致しない。
+ */
+const BROAD_GAP = 24;
+
 export function generateStrokes(input: GenerateInput): GenerateResult {
   const scale = Math.max(input.img.width, input.img.height) / 1024;
-  let spacing = Math.max(2, input.style.spacing * Math.max(0.55, scale));
+  let spacing = Math.max(
+    1.6,
+    input.style.spacing * Math.max(0.55, scale) * input.quality.spacingScale,
+  );
   let coarsened = false;
 
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -71,15 +84,19 @@ interface BuildResult {
 }
 
 function build(input: GenerateInput, spacing: number): BuildResult {
-  const { img, edges, color, seg, assign, lines, style, seed } = input;
+  const { img, edges, color, seg, assign, lines, style, seed, quality } = input;
   const w = img.width;
   const h = img.height;
-  const table = createStrokeTable(input.maxStrokes);
+  const table = createStrokeTable(quality.maxStrokes);
   const stageOffset = new Int32Array(STAGE_COUNT + 1);
   let overflow = false;
   let serial = 0;
+  // 最後の一撫でぶんは必ず残す。ここが欠けると元画像と一致しなくなるため、
+  // 予算が尽きても削らない。
+  const broadCount = Math.ceil(h / BROAD_GAP) + 4;
+  let limit = Math.max(1, quality.maxStrokes - broadCount);
 
-  const sampleStep = Math.max(1, spacing * 0.42);
+  const sampleStep = Math.max(0.8, spacing * 0.42);
   const widthBase = spacing * style.widthFactor;
   const maxLen = style.maxLength * Math.max(0.6, spacing / style.spacing);
 
@@ -95,6 +112,11 @@ function build(input: GenerateInput, spacing: number): BuildResult {
     const ny = len > 1e-3 ? (x1 - x0) / len : 0;
     const k = randSigned(seed ^ 0x2f1b, serial, 0x77) * bow * Math.min(len * 0.35, 14);
     const duration = clamp(Math.round(len / style.speed) + 1, 1, 255);
+    if (table.count >= limit) {
+      overflow = true;
+      serial++;
+      return;
+    }
     const ok = pushStroke(table, {
       x0, y0,
       cx: mx + nx * k,
@@ -148,22 +170,27 @@ function build(input: GenerateInput, spacing: number): BuildResult {
   const regionsByStage = groupRegions(seg, assign, input.minArea);
 
   /**
-   * 画面全体を大きな筆で一度覆う。
+   * 下塗り。画面全体を大きな筆で一度覆う。
    *
    * 領域として拾えなかった細かい部分（写真の粒状感など）が紙のまま残らないよう、
-   * 平均色でざっと敷いておく。実際の制作でも、細部に入る前に全体の色を置く。
+   * 平均色でざっと敷いておく。すでに引いてある線の下へ入るので、線画は消えない。
    */
   function blockIn(): void {
     const gap = spacing * 2.8;
     const runLen = Math.max(gap * 3, maxLen * 1.8);
-    for (let y = gap * 0.5; y < h + gap; y += gap) {
+    let row = 0;
+    for (let y = gap * 0.5; y < h + gap; y += gap, row++) {
       const yy = Math.min(h - 1, y);
-      for (let x = 0; x < w; x += runLen) {
+      // 行ごとに継ぎ目の位置をずらす。そろえると縦の筋が見えてしまう。
+      const offset = -runLen * rand01(seed ^ 0x4b1, row);
+      for (let x = offset; x < w; x += runLen) {
+        const x0 = Math.max(0, x);
         const x1 = Math.min(w - 1, x + runLen);
+        if (x1 - x0 < gap * 0.5) continue;
         // 区間の平均色を取る（1 点だけ見ると粒に引っぱられる）。
         let cr = 0, cg = 0, cb = 0, n = 0;
         for (let t = 0; t <= 6; t++) {
-          const sx = clamp(Math.round(x + ((x1 - x) * t) / 6), 0, w - 1);
+          const sx = clamp(Math.round(x0 + ((x1 - x0) * t) / 6), 0, w - 1);
           const p = (Math.round(yy) * w + sx) * 4;
           cr += img.smooth[p];
           cg += img.smooth[p + 1];
@@ -172,13 +199,13 @@ function build(input: GenerateInput, spacing: number): BuildResult {
         }
         const col = vary(rgb(cr / n, cg / n, cb / n), style.colorJitter * 0.5, serial);
         const wob = randSigned(seed ^ 0x60d, serial, 4) * gap * 0.25;
-        const under = seg.labels[Math.round(yy) * w + clamp(Math.round(x), 0, w - 1)];
+        const under = seg.labels[Math.round(yy) * w + clamp(Math.round(x0), 0, w - 1)];
         emit(
-          x, yy + wob, x1, yy - wob,
-          gap * 1.2, col, Math.min(1, style.fillOpacity * 1.15), 0.7,
-          Stage.Background,
+          x0, yy + wob, x1, yy - wob,
+          gap * 1.2, col, 1, 0.7,
+          Stage.Base,
           under >= 0 ? assign.regionLayer[under] : assign.roughLayer,
-          Brush.Flat, style.bow * 0.4,
+          Brush.Under, style.bow * 0.4,
         );
       }
     }
@@ -264,42 +291,26 @@ function build(input: GenerateInput, spacing: number): BuildResult {
     }
   };
 
-  // ---- 背景 ----
-  stageOffset[Stage.Background] = table.count;
-  blockIn();
-  for (const r of regionsByStage[Stage.Background]) {
-    hatch(
-      r, spacing * 1.5, maxLen * 1.6, Stage.Background, assign.regionLayer[r.id],
-      fillBrush, style.fillOpacity, 1.35, Math.max(1, style.fillPasses - 1),
-    );
-  }
-
   // ---- ラフ ----
+  // 形を探る当たり線だけを引く。色はここでは置かない（着色の仕事）。
   stageOffset[Stage.Rough] = table.count;
-  if (style.rough > 0.02) {
-    const majors = [...regionsByStage[Stage.Background], ...regionsByStage[Stage.Base]]
-      .sort((a, b) => b.area - a.area)
-      .slice(0, Math.max(3, Math.round(18 * style.rough)));
-    for (const r of majors) {
-      hatch(
-        r, spacing * (6 - style.rough * 2), maxLen * 2.2, Stage.Rough, assign.roughLayer,
-        Brush.Flat, style.fillOpacity * 0.45 * style.rough + 0.05, 3.2, 1,
-      );
-    }
-    // 形を探る当たり線。
-    const sketchCount = Math.round(lines.length * 0.12 * style.rough);
+  {
+    const sketchCount = Math.min(
+      lines.length,
+      Math.round(lines.length * (0.2 + style.rough * 0.3)),
+    );
     for (let i = 0; i < sketchCount; i++) {
       const ln = lines[i];
       if (!ln) break;
-      const a = 0;
       const b = ln.count - 1;
-      const x0 = ln.pts[a * 2] + randSigned(seed, i, 11) * 4;
-      const y0 = ln.pts[a * 2 + 1] + randSigned(seed, i, 12) * 4;
-      const x1 = ln.pts[b * 2] + randSigned(seed, i, 13) * 4;
-      const y1 = ln.pts[b * 2 + 1] + randSigned(seed, i, 14) * 4;
+      const jitter = 2 + style.jitter * 1.5;
+      const x0 = ln.pts[0] + randSigned(seed, i, 11) * jitter;
+      const y0 = ln.pts[1] + randSigned(seed, i, 12) * jitter;
+      const x1 = ln.pts[b * 2] + randSigned(seed, i, 13) * jitter;
+      const y1 = ln.pts[b * 2 + 1] + randSigned(seed, i, 14) * jitter;
       emit(
-        x0, y0, x1, y1, style.lineWidth * 1.4, 0x8b8378,
-        0.28 * style.rough + 0.08, 0.5, Stage.Rough, assign.roughLayer, Brush.Round, style.bow * 1.6,
+        x0, y0, x1, y1, style.lineWidth * 1.3, 0x8b8378,
+        0.3, 0.5, Stage.Rough, assign.roughLayer, Brush.Round, style.bow * 1.6,
       );
     }
   }
@@ -383,12 +394,20 @@ function build(input: GenerateInput, spacing: number): BuildResult {
   }
 
   // ---- ベースカラー ----
+  // まず下塗りで画面全体に色を入れ、そのあと広い面から順に置く。
+  // 下塗りは引いた線の下へ潜り込むので、線画は塗りで消えない。
   stageOffset[Stage.Base] = table.count;
-  for (const r of regionsByStage[Stage.Base]) {
-    hatch(
-      r, spacing, maxLen, Stage.Base, assign.regionLayer[r.id],
-      fillBrush, style.fillOpacity, 1, style.fillPasses,
-    );
+  {
+    blockIn();
+    const area = w * h;
+    for (const r of regionsByStage[Stage.Base]) {
+      const wide = r.area / area > 0.05;
+      hatch(
+        r, spacing * (wide ? 1.45 : 1), maxLen * (wide ? 1.5 : 1), Stage.Base,
+        assign.regionLayer[r.id], fillBrush, style.fillOpacity,
+        wide ? 1.3 : 1, wide ? Math.max(1, style.fillPasses - 1) : style.fillPasses,
+      );
+    }
   }
 
   // ---- 影 ----
@@ -449,54 +468,189 @@ function build(input: GenerateInput, spacing: number): BuildResult {
   }
 
   // ---- 仕上げ ----
+  //
+  // 元画像そのものを絵の具として筆に乗せ、画面を詰めていく。筆が通ったところには
+  // 元の画素がそのまま置かれるので、塗り重ねだけで最後は元画像と一致する。
+  // 別の絵を後から重ねるのではなく、あくまで筆を置いて仕上げる。
   stageOffset[Stage.Finish] = table.count;
   {
-    // 主要な輪郭を締め直し、明るい点を置く。
-    const accents = Math.min(lines.length, 70);
-    for (let i = 0; i < accents; i++) {
-      const ln = lines[i];
-      const b = ln.count - 1;
-      const m = b >> 1;
-      const x0 = ln.pts[0];
-      const y0 = ln.pts[1];
-      const x1 = ln.pts[b * 2];
-      const y1 = ln.pts[b * 2 + 1];
-      const ccx = 2 * ln.pts[m * 2] - (x0 + x1) / 2;
-      const ccy = 2 * ln.pts[m * 2 + 1] - (y0 + y1) / 2;
-      const len = Math.hypot(x1 - x0, y1 - y0);
-      if (len < 6) continue;
-      const ok = pushStroke(table, {
-        x0, y0, cx: ccx, cy: ccy, x1, y1,
-        width: style.lineWidth * 0.7,
-        color: blend(darkestNear(ln.pts[m * 2], ln.pts[m * 2 + 1]), 0x120f0e, 0.5),
-        opacity: Math.round(style.lineOpacity * 0.55 * 255),
-        pressure: 200,
-        duration: clamp(Math.round(len / style.speed) + 1, 1, 255),
-        stage: Stage.Finish,
-        layer: assign.finishLayer,
-        brush: Brush.Round,
-      });
-      if (!ok) overflow = true;
-      serial++;
+    const rest = Math.max(0, limit - table.count);
+    refine(Math.round(rest * 0.58));
+    sweep(rest - Math.round(rest * 0.58));
+    // 取り置いたぶんを解放して、最後の一撫でを必ず入れる。
+    limit = table.capacity;
+    broadSweep();
+  }
+
+  /**
+   * 詰め。
+   *
+   * 「まだ情報が足りていないところ」＝輪郭が強く、周囲との色の差が大きいところから
+   * 順に置く。ただし順番どおりに並べると画面を上から順に舐めるような動きになるので、
+   * 網の目を間引いた層に分け、全体をうっすら詰めてから密度を上げていく。
+   * 絵全体が同時に鮮明になっていくように見える。
+   */
+  function refine(budget: number): void {
+    if (budget <= 8) return;
+    const ideal = Math.sqrt((w * h) / (budget * 1.5));
+    const gap = clamp(ideal, Math.max(1.2, spacing * style.refine * quality.refineScale), spacing * 1.3);
+    const cols = Math.max(1, Math.floor(w / gap));
+    const rows = Math.max(1, Math.floor(h / gap));
+    const total = cols * rows;
+    const px = new Float32Array(total);
+    const py = new Float32Array(total);
+    const score = new Float32Array(total);
+    const layer = new Uint8Array(total);
+    const order = new Int32Array(total);
+
+    // 4×4 の並びで 16 層に分ける。層 0 だけでも画面全体に散らばる。
+    const SPREAD = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+    const step = Math.max(1, Math.round(gap));
+    for (let ry = 0; ry < rows; ry++) {
+      for (let rx = 0; rx < cols; rx++) {
+        const k = ry * cols + rx;
+        const x = (rx + 0.5) * gap;
+        const y = (ry + 0.5) * gap;
+        const ix = clamp(Math.round(x), 1, w - 2);
+        const iy = clamp(Math.round(y), 1, h - 2);
+        const i = iy * w + ix;
+        px[k] = x;
+        py[k] = y;
+        layer[k] = SPREAD[(ry % 4) * 4 + (rx % 4)];
+        // 輪郭の強さと、上下左右との色の差を足し合わせる。
+        let s = edges.mag[i] * 1.5;
+        const c0 = i * 4;
+        for (const [dx, dy] of [[step, 0], [-step, 0], [0, step], [0, -step]] as const) {
+          const nx = clamp(ix + dx, 0, w - 1);
+          const ny = clamp(iy + dy, 0, h - 1);
+          const c1 = (ny * w + nx) * 4;
+          s += (Math.abs(img.smooth[c0] - img.smooth[c1]) +
+            Math.abs(img.smooth[c0 + 1] - img.smooth[c1 + 1]) +
+            Math.abs(img.smooth[c0 + 2] - img.smooth[c1 + 2])) * 0.4;
+        }
+        score[k] = s;
+        order[k] = k;
+      }
     }
-    const sparkles = 90;
-    for (let i = 0; i < sparkles; i++) {
-      const x = rand01(seed ^ 0x1f3, i, 1) * w;
-      const y = rand01(seed ^ 0x1f3, i, 2) * h;
-      const ix = clamp(Math.round(x), 0, w - 1);
-      const iy = clamp(Math.round(y), 0, h - 1);
-      if (img.lum[iy * w + ix] < 205) continue;
-      const c = pick(ix, iy);
+
+    // 情報量の多い順に、予算のぶんだけ選ぶ。型付き配列のまま並べ替える。
+    const take = Math.min(budget, total);
+    order.sort((a, b) => score[b] - score[a]);
+    const picked = order.subarray(0, take);
+    const maxScore = take > 0 ? score[picked[0]] : 1;
+
+    // 層を先に、その中では情報量の多い順。画面全体が少しずつ詰まっていく。
+    picked.sort((a, b) => {
+      if (layer[a] !== layer[b]) return layer[a] - layer[b];
+      const ba = Math.floor((1 - score[a] / (maxScore || 1)) * 4);
+      const bb = Math.floor((1 - score[b] / (maxScore || 1)) * 4);
+      if (ba !== bb) return ba - bb;
+      return a - b;
+    });
+
+    const len = gap * 2.1;
+    for (const k of picked) {
+      const x = px[k];
+      const y = py[k];
+      const ix = clamp(Math.round(x), 1, w - 2);
+      const iy = clamp(Math.round(y), 1, h - 2);
+      const i = iy * w + ix;
+      // 輪郭に沿って引く。平らなところは緩やかに向きを散らす。
+      const g = Math.hypot(edges.gx[i], edges.gy[i]);
+      let tx: number;
+      let ty: number;
+      if (g > 4) {
+        tx = -edges.gy[i] / g;
+        ty = edges.gx[i] / g;
+      } else {
+        const a = rand01(seed ^ 0x3c7, k) * Math.PI;
+        tx = Math.cos(a);
+        ty = Math.sin(a);
+      }
+      const half = len * (0.45 + rand01(seed ^ 0x77, k) * 0.35);
+      const jx = randSigned(seed ^ 0x21, k, 1) * gap * 0.18;
+      const jy = randSigned(seed ^ 0x22, k, 2) * gap * 0.18;
       emit(
-        ix - 1, iy, ix + 1.5, iy - 0.5, widthBase * 0.5,
-        blend(c, 0xffffff, 0.35), 0.5, 0.9,
-        Stage.Finish, assign.finishLayer, Brush.Soft, 0.2,
+        x - tx * half + jx, y - ty * half + jy,
+        x + tx * half + jx, y + ty * half + jy,
+        gap * 1.35, pick(x, y), 1, 0.75 + rand01(seed, k, 9) * 0.25,
+        Stage.Finish, assign.finishLayer, Brush.Refine, style.bow * 0.3,
       );
     }
   }
 
+  /**
+   * 全体を撫でる掃き。
+   *
+   * 細かい筆で画面全体をなぞる。行の順番は飛び飛びにして、上から下へ拭き取るような
+   * 動きに見えないようにする。
+   */
+  function sweep(budget: number): void {
+    if (budget <= 4) return;
+    const segLen = Math.max(8, spacing * 4);
+    const perRow = Math.ceil((w + 2) / segLen);
+    const rowCount = Math.max(1, Math.min(Math.floor(budget / perRow), Math.ceil(h * 2)));
+    const gap = h / rowCount;
+    const width = gap * 2.2 + 2;
+
+    // 行を飛び飛びにたどる（0, 1/2, 1/4, 3/4, …）。
+    const rowOrder = new Int32Array(rowCount);
+    for (let i = 0; i < rowCount; i++) rowOrder[i] = i;
+    rowOrder.sort((a, b) => bitReverse(a, rowCount) - bitReverse(b, rowCount) || a - b);
+
+    for (const r of rowOrder) {
+      const y = (r + 0.5) * gap;
+      for (let x = -1; x < w + 1; x += segLen) {
+        const x1 = Math.min(w + 1, x + segLen);
+        emit(
+          x, y, x1, y, width, pick((x + x1) / 2, y), 1, 1,
+          Stage.Finish, assign.finishLayer, Brush.Refine, 0,
+        );
+      }
+    }
+  }
+
+  /**
+   * 最後の一撫で。
+   *
+   * 細い筆だけで仕上げると、筆の縁のぼかしが 8bit の丸めで 1 段階ずれたまま残り、
+   * 元画像と完全には一致しない。最後に幅の広い筆で一度なでると、どの画素も筆の
+   * 内側（ぼかしのかからない部分）に入るため、ずれが残らない。
+   *
+   * この時点で画面はほぼ元画像なので、見た目には何も起きていないように見える。
+   */
+  function broadSweep(): void {
+    const gap = BROAD_GAP;
+    // 太い筆で横へ引いていく。
+    for (let r = -1; r <= Math.ceil(h / gap); r++) {
+      const y = (r + 0.5) * gap;
+      emit(
+        -2, y, w + 2, y, gap * 2.2, pick(w / 2, clamp(y, 0, h - 1)), 1, 1,
+        Stage.Finish, assign.finishLayer, Brush.Refine, 0,
+      );
+    }
+    // 最後は画面と同じ高さの筆でひと息に通す。
+    // 筆の縁（ぼかしのかかる部分）が画面の外へ出るため、全画素が筆の内側に入り、
+    // 8bit の丸めによるわずかなずれも残らない。
+    emit(
+      -2, h / 2, w + 2, h / 2, h * 1.3, pick(w / 2, h / 2), 1, 1,
+      Stage.Finish, assign.finishLayer, Brush.Refine, 0,
+    );
+  }
+
   stageOffset[STAGE_COUNT] = table.count;
   return { table, stageOffset, overflow };
+}
+
+/** 0..n-1 を「半分ずつ間を埋める」順に並べるための重み。 */
+function bitReverse(v: number, n: number): number {
+  let bits = 1;
+  while (1 << bits < n) bits++;
+  let out = 0;
+  for (let i = 0; i < bits; i++) {
+    out = (out << 1) | ((v >> i) & 1);
+  }
+  return out;
 }
 
 function groupRegions(seg: Segmentation, assign: LayerAssignment, minArea: number): Region[][] {

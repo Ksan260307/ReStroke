@@ -24,9 +24,22 @@ export interface TraceOptions {
   minLength: number;
   /** 取り出す線の最大本数 */
   maxLines: number;
+  /**
+   * なぞった画素の周囲を、何画素ぶん自分のものとして確保するか。
+   *
+   * 0 にすると隣り合う稜線をそれぞれ別の線として拾うので、線の本数が大きく増える。
+   * 1 にすると太い輪郭が 1 本にまとまり、本数は減るが 1 本 1 本が長くなる。
+   */
+  claimRadius: number;
 }
 
-const DEFAULTS: TraceOptions = { step: 1.6, stopRatio: 0.5, minLength: 7, maxLines: 4000 };
+const DEFAULTS: TraceOptions = {
+  step: 1.6,
+  stopRatio: 0.5,
+  minLength: 7,
+  maxLines: 4000,
+  claimRadius: 1,
+};
 
 export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}): Polyline[] {
   const opt = { ...DEFAULTS, ...options };
@@ -163,10 +176,11 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
 
   /** その画素の周囲を現在の線のものとして確保する（先に取った線が優先）。 */
   function claim(ix: number, iy: number): void {
-    for (let yy = iy - 1; yy <= iy + 1; yy++) {
+    const r = opt.claimRadius;
+    for (let yy = iy - r; yy <= iy + r; yy++) {
       if (yy < 0 || yy >= h) continue;
       const row = yy * w;
-      for (let xx = ix - 1; xx <= ix + 1; xx++) {
+      for (let xx = ix - r; xx <= ix + r; xx++) {
         if (xx < 0 || xx >= w) continue;
         if (owner[row + xx] === 0) owner[row + xx] = currentLine;
       }

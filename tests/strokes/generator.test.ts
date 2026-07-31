@@ -7,18 +7,51 @@ import { segment } from '../../src/analysis/segment';
 import { estimateLayers } from '../../src/analysis/layers';
 import { traceLines } from '../../src/analysis/lineart';
 import { STAGE_COUNT, Stage } from '../../src/core/schema';
+import type { StrokeTable } from '../../src/core/schema';
 import type { WorkImage } from '../../src/analysis/image';
-import { noisyImage, sceneImage, solidImage, style } from '../helpers/fixtures';
+import { noisyImage, quality, sceneImage, solidImage, style } from '../helpers/fixtures';
 
 function makeInput(img: WorkImage, styleId = 'professional', maxStrokes = 12000): GenerateInput {
   const st = style(styleId);
+  const q = quality({ level: 4, maxStrokes });
   const minArea = Math.max(12, Math.round((img.width * img.height) / 9000));
-  const edges = detectEdges(img.lum, img.width, img.height, 1);
+  const edges = detectEdges(img.lum, img.width, img.height, 1, q.edgeRatio);
   const color = quantize(img.smooth, img.width, img.height, st.paletteSize);
   const seg = segment(color.index, img.lum, img.width, img.height, minArea);
   const assign = estimateLayers(seg, color.palette, imageStats(img).meanLum, minArea);
-  const lines = st.lineArt || st.rough > 0.02 ? traceLines(edges, { minLength: 5 }) : [];
-  return { img, edges, color, seg, assign, lines, style: st, seed: 0x5eed, maxStrokes, minArea };
+  const lines = traceLines(edges, { minLength: 5, claimRadius: q.claimRadius });
+  return { img, edges, color, seg, assign, lines, style: st, seed: 0x5eed, quality: q, minArea };
+}
+
+/**
+ * 指定範囲のストロークが実際に覆う画素数を数える。
+ *
+ * 最終フレームが元画像と一致するのは「全画素がどれかの筆の内側に入る」からなので、
+ * その前提が本当に成り立っているかを幾何的に確かめる。
+ */
+function coverageOf(s: StrokeTable, from: number, w: number, h: number): number {
+  const mask = new Uint8Array(w * h);
+  for (let i = from; i < s.count; i++) {
+    if (s.opacity[i] < 255) continue;
+    const r = (s.width[i] * (0.65 + 0.35 * (s.pressure[i] / 255))) / 2;
+    const steps = Math.max(2, Math.ceil(Math.hypot(s.x1[i] - s.x0[i], s.y1[i] - s.y0[i]) * 2));
+    for (let k = 0; k <= steps; k++) {
+      const u = k / steps;
+      const iu = 1 - u;
+      const cx = iu * iu * s.x0[i] + 2 * iu * u * s.cx[i] + u * u * s.x1[i];
+      const cy = iu * iu * s.y0[i] + 2 * iu * u * s.cy[i] + u * u * s.y1[i];
+      for (let y = Math.max(0, Math.ceil(cy - r)); y <= Math.min(h - 1, Math.floor(cy + r)); y++) {
+        const dy = y - cy;
+        const dx = Math.sqrt(Math.max(0, r * r - dy * dy));
+        for (let x = Math.max(0, Math.ceil(cx - dx)); x <= Math.min(w - 1, Math.floor(cx + dx)); x++) {
+          mask[y * w + x] = 1;
+        }
+      }
+    }
+  }
+  let n = 0;
+  for (let i = 0; i < mask.length; i++) n += mask[i];
+  return n;
 }
 
 describe('ストローク生成', () => {
@@ -61,7 +94,7 @@ describe('ストローク生成', () => {
       expect(s.duration[i]).toBeGreaterThanOrEqual(1);
       expect(s.color[i]).toBeLessThanOrEqual(0xffffff);
       expect(s.stage[i]).toBeLessThan(STAGE_COUNT);
-      expect(s.brush[i]).toBeLessThanOrEqual(3);
+      expect(s.brush[i]).toBeLessThanOrEqual(5);
     }
   });
 
@@ -80,22 +113,76 @@ describe('ストローク生成', () => {
     expect(large.coarsened).toBe(false);
   });
 
-  it('画面全体が下塗りで覆われる（紙が残らない）', () => {
+  it('ラフは線だけを引き、色を置かない', () => {
+    const r = generateStrokes(makeInput(sceneImage()));
+    const s = r.strokes;
+    let count = 0;
+    for (let i = r.stageOffset[Stage.Rough]; i < r.stageOffset[Stage.LineArt]; i++) {
+      count++;
+      // 当たり線は細く、下塗り用の平筆ではない
+      expect(s.brush[i]).toBe(1);
+      expect(s.width[i]).toBeLessThan(8);
+    }
+    expect(count).toBeGreaterThan(0);
+  });
+
+  it('下塗りは着色工程にあり、線の下へ潜り込む', () => {
     const img = noisyImage(160, 120);
     const r = generateStrokes(makeInput(img, 'professional'));
-    const background = [];
-    for (let i = r.stageOffset[Stage.Background]; i < r.stageOffset[Stage.Rough]; i++) {
-      background.push(i);
+    const under: number[] = [];
+    for (let i = r.stageOffset[Stage.Base]; i < r.stageOffset[Stage.Shadow]; i++) {
+      if (r.strokes.brush[i] === 5) under.push(i);
     }
-    expect(background.length).toBeGreaterThan(0);
-    // 下塗りの帯が画像の縦全体に渡っていること
-    const ys = background.map((i) => r.strokes.y0[i]);
+    expect(under.length).toBeGreaterThan(0);
+    // 下塗りの帯が画像の縦横いっぱいに渡っていること
+    const ys = under.map((i) => r.strokes.y0[i]);
     expect(Math.min(...ys)).toBeLessThan(img.height * 0.15);
     expect(Math.max(...ys)).toBeGreaterThan(img.height * 0.85);
-    const xs0 = background.map((i) => r.strokes.x0[i]);
-    const xs1 = background.map((i) => r.strokes.x1[i]);
-    expect(Math.min(...xs0)).toBeLessThan(img.width * 0.1);
-    expect(Math.max(...xs1)).toBeGreaterThan(img.width * 0.9);
+    expect(Math.min(...under.map((i) => r.strokes.x0[i]))).toBeLessThan(img.width * 0.1);
+    expect(Math.max(...under.map((i) => r.strokes.x1[i]))).toBeGreaterThan(img.width * 0.9);
+    // ラフには下塗りが残っていない
+    for (let i = r.stageOffset[Stage.Rough]; i < r.stageOffset[Stage.LineArt]; i++) {
+      expect(r.strokes.brush[i]).not.toBe(5);
+    }
+  });
+
+  it('仕上げで残りの予算を使い切って詰める', () => {
+    const budget = 6000;
+    const r = generateStrokes(makeInput(sceneImage(200, 150), 'professional', budget));
+    const finish = r.stageOffset[STAGE_COUNT] - r.stageOffset[Stage.Finish];
+    expect(finish).toBeGreaterThan(100);
+    // 予算のほとんどを使い切る
+    expect(r.strokes.count).toBeGreaterThan(budget * 0.85);
+    expect(r.strokes.count).toBeLessThanOrEqual(budget);
+    // 詰めはすべて元画像を絵の具にする筆で、不透明に置く
+    for (let i = r.stageOffset[Stage.Finish]; i < r.strokes.count; i++) {
+      expect(r.strokes.brush[i]).toBe(4);
+      expect(r.strokes.opacity[i]).toBe(255);
+    }
+  });
+
+  it('仕上げの最後の掃きが画面の全画素を覆う', () => {
+    const img = sceneImage(160, 120);
+    const r = generateStrokes(makeInput(img, 'professional', 8000));
+    const covered = coverageOf(r.strokes, r.stageOffset[Stage.Finish], img.width, img.height);
+    expect(covered, '塗り残しがある').toBe(img.width * img.height);
+  });
+
+  it('粒度を上げても掃きの覆いは崩れない', () => {
+    for (const level of [1, 4, 8]) {
+      const img = sceneImage(140, 110);
+      const base = makeInput(img, 'watercolor');
+      const r = generateStrokes({ ...base, quality: quality({ level }) });
+      const covered = coverageOf(r.strokes, r.stageOffset[Stage.Finish], img.width, img.height);
+      expect(covered, `レベル ${level} で塗り残しがある`).toBe(img.width * img.height);
+    }
+  });
+
+  it('予算を増やすほど詰めが細かくなる', () => {
+    const small = generateStrokes(makeInput(sceneImage(200, 150), 'professional', 3000));
+    const large = generateStrokes(makeInput(sceneImage(200, 150), 'professional', 12000));
+    const count = (r: typeof small): number => r.stageOffset[STAGE_COUNT] - r.stageOffset[Stage.Finish];
+    expect(count(large)).toBeGreaterThan(count(small) * 2);
   });
 
   it('線画を持たない画風では線画工程が空になる', () => {

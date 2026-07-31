@@ -38,14 +38,18 @@ describe('レイヤー推定', () => {
     }
   });
 
-  it('広くて画面端に接する領域は背景になる', () => {
+  it('背景にあたる広い面はベースカラーへ吸収される（独立した工程を持たない）', () => {
     const { seg, assign } = analyzeLayers(sceneImage());
     const total = seg.width * seg.height;
-    const backgrounds = seg.regions.filter((r) => assign.regionStage[r.id] === Stage.Background);
-    expect(backgrounds.length).toBeGreaterThan(0);
-    for (const r of backgrounds) {
-      expect(r.area / total).toBeGreaterThan(0.02);
+    const wide = seg.regions.filter((r) => r.area / total > 0.05);
+    expect(wide.length).toBeGreaterThan(0);
+    for (const r of wide) {
+      expect(assign.regionStage[r.id]).toBe(Stage.Base);
     }
+    // 画面端に接する広い面（空・地面）も同じ扱い
+    const border = seg.regions.filter((r) => r.touchesBorder && r.area / total > 0.05);
+    expect(border.length).toBeGreaterThan(0);
+    for (const r of border) expect(assign.regionStage[r.id]).toBe(Stage.Base);
   });
 
   it('暗く狭い領域は影、明るく狭い領域は光になる', () => {
@@ -66,7 +70,7 @@ describe('レイヤー推定', () => {
     const named = assign.layers.filter((l) => l.name.includes('・'));
     expect(named.length).toBeGreaterThan(0);
     for (const l of named) {
-      expect(l.name).toMatch(/^(背景|ラフ|線画|ベースカラー|影|光|細部|仕上げ)・/);
+      expect(l.name).toMatch(/^(ラフ|線画|ベースカラー|影|光|細部|仕上げ)・/);
     }
   });
 

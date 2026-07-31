@@ -8,6 +8,7 @@
 import './style.css';
 import { analyze } from './analysis/pipeline';
 import { decodeImageFile } from './analysis/image';
+import { DEFAULT_QUALITY, describeQuality, qualityFor } from './analysis/quality';
 import { STYLES, styleById } from './strokes/styles';
 import { TimelapseEngine } from './core/engine';
 import { FrameMetrics } from './core/metrics';
@@ -34,7 +35,9 @@ const ui = {
   lengthCustom: $<HTMLInputElement>('length-custom'),
   fps: $<HTMLSelectElement>('fps-select'),
   size: $<HTMLSelectElement>('size-select'),
-  detail: $<HTMLSelectElement>('detail-select'),
+  quality: $<HTMLInputElement>('quality-input'),
+  qualityLevel: $<HTMLElement>('quality-level'),
+  qualityNote: $<HTMLElement>('quality-note'),
   seed: $<HTMLInputElement>('seed-input'),
   generate: $<HTMLButtonElement>('generate'),
   analysisProgress: $<HTMLDivElement>('analysis-progress'),
@@ -141,6 +144,15 @@ function buildLengthList(): void {
   }
 }
 
+function updateQualityNote(): void {
+  const q = qualityFor(Number(ui.quality.value));
+  ui.qualityLevel.textContent = `レベル ${q.level}`;
+  ui.qualityNote.textContent =
+    `${describeQuality(q)}。上げるほど工程が細かくなり元画像に近づきます（生成に時間がかかります）。`;
+}
+
+ui.quality.addEventListener('input', updateQualityNote);
+
 ui.lengthCustom.addEventListener('input', () => {
   const v = Number(ui.lengthCustom.value);
   if (Number.isFinite(v) && v >= 3 && v <= 600) {
@@ -213,14 +225,12 @@ async function generate(): Promise<void> {
     const style = styleById(state.styleId);
     const seed = resolveSeed(ui.seed.value);
     const outputSide = Number(ui.size.value);
-    const analysisSide = Math.min(1152, outputSide);
-    const maxStrokes = Number(ui.detail.value);
+    const quality = qualityFor(Number(ui.quality.value));
 
     const result = await analyze(state.bitmap, {
       style,
       seed,
-      analysisSide,
-      maxStrokes,
+      quality,
       onProgress: (phase, ratio) => {
         ui.analysisLabel.textContent = phase;
         setProgress(ui.analysisBar, ratio);
@@ -569,7 +579,7 @@ async function loadLog(file: File): Promise<void> {
       throw new Error(`この工程データは再現できません（${check.reason}）`);
     }
 
-    const [styleId, , analysisSide, maxStrokes] = log.identity.params.split(':');
+    const [styleId, , level] = log.identity.params.split(':');
     if (STYLES.some((s) => s.id === styleId)) {
       state.styleId = styleId;
       buildStyleList();
@@ -580,8 +590,11 @@ async function loadLog(file: File): Promise<void> {
       ui.lengthCustom.value = String(duration);
       buildLengthList();
     }
-    if ([...ui.size.options].some((o) => o.value === analysisSide)) ui.size.value = analysisSide;
-    if ([...ui.detail.options].some((o) => o.value === maxStrokes)) ui.detail.value = maxStrokes;
+    const q = Number(level);
+    if (Number.isFinite(q) && q >= 1 && q <= 10) {
+      ui.quality.value = String(q);
+      updateQualityNote();
+    }
     ui.seed.value = formatSeed(log.seed);
 
     ui.analysisLabel.textContent = `設定を復元しました（${log.meta?.sourceName || '不明な画像'}）。同じ画像を読み込んで生成してください。`;
@@ -623,5 +636,7 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+ui.quality.value = String(DEFAULT_QUALITY);
 buildStyleList();
 buildLengthList();
+updateQualityNote();
