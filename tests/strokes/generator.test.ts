@@ -178,6 +178,16 @@ describe('ストローク生成', () => {
     }
   });
 
+  it('予算が極端に少なくても上限を超えず、最後の一撫では残る', () => {
+    for (const budget of [60, 150, 400]) {
+      const r = generateStrokes(makeInput(sceneImage(160, 120), 'professional', budget));
+      expect(r.strokes.count, `予算 ${budget}`).toBeLessThanOrEqual(budget);
+      // 全画素を覆う最後の一撫では、予算が尽きても削られない
+      const covered = coverageOf(r.strokes, r.stageOffset[Stage.Finish], 160, 120);
+      expect(covered, `予算 ${budget} で塗り残しがある`).toBe(160 * 120);
+    }
+  });
+
   it('予算を増やすほど詰めが細かくなる', () => {
     const small = generateStrokes(makeInput(sceneImage(200, 150), 'professional', 3000));
     const large = generateStrokes(makeInput(sceneImage(200, 150), 'professional', 12000));
@@ -249,5 +259,37 @@ describe('ストローク生成', () => {
       expect(s.duration[i]).toBeGreaterThanOrEqual(1);
       expect(s.duration[i]).toBeLessThanOrEqual(Math.max(2, len) + 2);
     }
+  });
+
+  it('同じ長さでも運びの速さがそろわない（手作業のばらつき）', () => {
+    const r = generateStrokes(makeInput(sceneImage(), 'professional', 20000));
+    const s = r.strokes;
+    // 長さがほぼ同じストロークを集めて、所要時間がばらけているかを見る
+    const buckets = new Map<number, Set<number>>();
+    for (let i = 0; i < s.count; i++) {
+      const len = Math.round(Math.hypot(s.x1[i] - s.x0[i], s.y1[i] - s.y0[i]));
+      if (len < 20) continue;
+      if (!buckets.has(len)) buckets.set(len, new Set());
+      buckets.get(len)!.add(s.duration[i]);
+    }
+    const varied = [...buckets.values()].filter((set) => set.size > 1).length;
+    expect(varied).toBeGreaterThan(3);
+  });
+
+  it('近いところを続けて塗る（筆が画面中を飛び回らない）', () => {
+    const img = sceneImage(240, 180);
+    const r = generateStrokes(makeInput(img, 'professional'));
+    const s = r.strokes;
+    let jumps = 0;
+    let count = 0;
+    // 前の筆を置き終えた位置から、次の筆を置き始める位置までの移動を見る。
+    // 着色工程だけを対象にする（仕上げは別の並べ方をしている）。
+    for (let i = r.stageOffset[Stage.Base] + 1; i < r.stageOffset[Stage.Finish]; i++) {
+      const d = Math.hypot(s.x0[i] - s.x1[i - 1], s.y0[i] - s.y1[i - 1]);
+      if (d > img.width * 0.5) jumps++;
+      count++;
+    }
+    expect(count).toBeGreaterThan(50);
+    expect(jumps / count).toBeLessThan(0.06);
   });
 });

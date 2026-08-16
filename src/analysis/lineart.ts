@@ -73,6 +73,14 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
 
   const lines: Polyline[] = [];
 
+  // 追跡中の点を置く作業用の入れ物。種ごとに確保し直すと、数十万回の確保が
+  // そのままゴミになるので、前後 1 組ずつを使い回す。
+  const MAX_STEPS = 512;
+  const fwdXs = new Float32Array(MAX_STEPS);
+  const fwdYs = new Float32Array(MAX_STEPS);
+  const bwdXs = new Float32Array(MAX_STEPS);
+  const bwdYs = new Float32Array(MAX_STEPS);
+
   for (let s = 0; s < seeds.length && lines.length < opt.maxLines; s++) {
     const p = seeds[s];
     if (owner[p] !== 0) continue;
@@ -80,9 +88,9 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
     const sx = p - sy * w;
 
     currentLine++;
-    const fwd = walk(sx, sy, 1);
-    const bwd = walk(sx, sy, -1);
-    const total = fwd.count + bwd.count;
+    const fwdCount = walk(sx, sy, 1, fwdXs, fwdYs);
+    const bwdCount = walk(sx, sy, -1, bwdXs, bwdYs);
+    const total = fwdCount + bwdCount;
     if (total < 2) {
       owner[p] = currentLine;
       continue;
@@ -90,13 +98,13 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
 
     const pts = new Float32Array(total * 2);
     let k = 0;
-    for (let i = bwd.count - 1; i >= 0; i--) {
-      pts[k++] = bwd.xs[i];
-      pts[k++] = bwd.ys[i];
+    for (let i = bwdCount - 1; i >= 0; i--) {
+      pts[k++] = bwdXs[i];
+      pts[k++] = bwdYs[i];
     }
-    for (let i = 0; i < fwd.count; i++) {
-      pts[k++] = fwd.xs[i];
-      pts[k++] = fwd.ys[i];
+    for (let i = 0; i < fwdCount; i++) {
+      pts[k++] = fwdXs[i];
+      pts[k++] = fwdYs[i];
     }
 
     let length = 0;
@@ -107,14 +115,33 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
     lines.push({ pts, count: total, length });
   }
 
-  // 長い線＝主要な形から先に描く。
-  lines.sort((a, b) => b.length - a.length);
+  // 長い線＝主要な形から先に描く。ただし長さの順にそのまま並べると、ペンが画面中を
+  // 飛び回る。長さで 3 段の帯に分け、その中では画面の上から下・左から右へ進める。
+  if (lines.length > 2) {
+    let longest = 0;
+    for (const l of lines) if (l.length > longest) longest = l.length;
+    if (longest <= 0) longest = 1;
+    const band = h / 3;
+    // 並べ替えの比較のたびに計算し直さないよう、先に段を求めておく。
+    const tiers = new Map<Polyline, number>();
+    for (const l of lines) {
+      tiers.set(l, Math.min(2, Math.floor((1 - l.length / longest) * 3)));
+    }
+    lines.sort((a, b) => {
+      const ta = tiers.get(a)!;
+      const tb = tiers.get(b)!;
+      if (ta !== tb) return ta - tb;
+      const ra = Math.floor(a.pts[1] / band);
+      const rb = Math.floor(b.pts[1] / band);
+      if (ra !== rb) return ra - rb;
+      // 同点は長さで倒し、並べ替えの実装によらず同じ結果になるようにする。
+      return a.pts[0] - b.pts[0] || b.length - a.length;
+    });
+  }
   return lines;
 
-  function walk(x0: number, y0: number, sign: number) {
-    const maxSteps = 512;
-    const xs = new Float32Array(maxSteps);
-    const ys = new Float32Array(maxSteps);
+  function walk(x0: number, y0: number, sign: number, xs: Float32Array, ys: Float32Array): number {
+    const maxSteps = MAX_STEPS;
     let count = 0;
     let x = x0 + 0.5;
     let y = y0 + 0.5;
@@ -122,7 +149,7 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
     let dx = -gy[i0];
     let dy = gx[i0];
     const norm = Math.hypot(dx, dy);
-    if (norm < 1e-4) return { xs, ys, count };
+    if (norm < 1e-4) return count;
     dx = (dx / norm) * sign;
     dy = (dy / norm) * sign;
 
@@ -171,7 +198,7 @@ export function traceLines(edges: EdgeMap, options: Partial<TraceOptions> = {}):
       x += dx * opt.step;
       y += dy * opt.step;
     }
-    return { xs, ys, count };
+    return count;
   }
 
   /** その画素の周囲を現在の線のものとして確保する（先に取った線が優先）。 */

@@ -12,7 +12,7 @@
 import type { DrawingPlan } from './schema';
 import { STAGE_COUNT, Stage } from './schema';
 import { Painter } from '../render/painter';
-import type { Surface } from '../render/surface';
+import type { PainterSnapshot } from '../render/painter';
 import type { StyleProfile } from '../strokes/styles';
 import {
   buildWorkPrefix,
@@ -38,11 +38,28 @@ export interface EngineOptions {
   /** 巻き戻し用キャッシュの点数（0 で無効） */
   checkpoints?: number;
   sourceName?: string;
-  /** 収束先の元画像 */
+  /** 仕上げで絵の具として使う元画像 */
   source?: CanvasImageSource | null;
 }
 
-type Snapshot = { tick: number; canvas: Surface; state: SimState };
+type Snapshot = { tick: number; canvas: PainterSnapshot; state: SimState };
+
+/**
+ * 1 つの工程に最低限あてる tick 数。
+ *
+ * 「その工程を描き終えた姿」を見せるための下限。これを割ると、工程が切り替わった
+ * ことに気づけないまま次へ流れてしまう。
+ */
+const MIN_STAGE_TICKS = 42;
+
+/**
+ * 巻き戻し用キャッシュに使ってよいメモリの目安（バイト）。
+ *
+ * 1 点あたり「色の面」と「線の面」の 2 枚を持つため、出力が大きいほど 1 点が重い。
+ * 点数を固定にすると高解像度で数百 MB になるので、大きさから点数を決める。
+ * キャッシュは捨てても結果は変わらないので、足りなければ減らせばよい。
+ */
+const SNAPSHOT_MEMORY_BUDGET = 48 * 1024 * 1024;
 
 export class TimelapseEngine {
   readonly plan: DrawingPlan;
@@ -72,7 +89,10 @@ export class TimelapseEngine {
     });
     this.params = buildSimParams(options.plan, options.style, options.durationSec, options.tickRate, options.seed);
     this.workPrefix = buildWorkPrefix(options.plan);
-    this.snapshotLimit = options.checkpoints ?? 8;
+    // 1 点あたり 2 枚 × 幅 × 高さ × 4 バイト。
+    const perSnapshot = this.painter.width * this.painter.height * 4 * 2;
+    const affordable = Math.max(1, Math.floor(SNAPSHOT_MEMORY_BUDGET / perSnapshot));
+    this.snapshotLimit = Math.min(options.checkpoints ?? 8, affordable);
     this.snapshotInterval = Math.max(
       30,
       Math.ceil(this.params.totalTicks / Math.max(1, this.snapshotLimit)),
@@ -267,22 +287,29 @@ export function buildSimParams(
 
   const stageTicks = new Int32Array(STAGE_COUNT);
   const stageStart = new Int32Array(STAGE_COUNT);
+  const usedStages: number[] = [];
+  for (let s = 0; s < STAGE_COUNT; s++) if (weights[s] > 0) usedStages.push(s);
+  if (usedStages.length === 0) {
+    weights[Stage.Base] = 1;
+    sum = 1;
+    usedStages.push(Stage.Base);
+  }
+
+  // どの工程にも最低限の持ち時間を配ってから、残りを重みで分ける。
+  // 尺が短いときでも「その工程を終えた姿」が一瞬で流れてしまわないようにする。
+  const minTicks = Math.max(
+    1,
+    Math.min(MIN_STAGE_TICKS, Math.floor(totalTicks / (usedStages.length * 2))),
+  );
+  const pool = Math.max(0, totalTicks - minTicks * usedStages.length);
   let assigned = 0;
-  let lastUsed = -1;
-  for (let s = 0; s < STAGE_COUNT; s++) {
-    if (weights[s] <= 0) continue;
-    const t = Math.max(1, Math.floor((weights[s] / sum) * totalTicks));
+  for (const s of usedStages) {
+    const t = minTicks + Math.floor((weights[s] / sum) * pool);
     stageTicks[s] = t;
     assigned += t;
-    lastUsed = s;
-  }
-  if (lastUsed < 0) {
-    stageTicks[Stage.Base] = totalTicks;
-    lastUsed = Stage.Base;
-    assigned = totalTicks;
   }
   // 端数は最後の工程へ寄せる（合計が指定尺と必ず一致するように）。
-  stageTicks[lastUsed] += totalTicks - assigned;
+  stageTicks[usedStages[usedStages.length - 1]] += totalTicks - assigned;
 
   let acc = 0;
   for (let s = 0; s < STAGE_COUNT; s++) {

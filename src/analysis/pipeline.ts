@@ -92,9 +92,11 @@ export async function analyzeWorkImage(
 
   await report('描画順を推定しています', 0.74);
   // 線画は工程の主役なので、短い線も拾って本数を確保する。
+  // ただし 1 本ごとに点列を持つため、上限は付けておく。粒状の画像では輪郭候補が
+  // いくらでも出てくるので、これが無いと本数もメモリも際限なく増える。
   const lines = traceLines(edges, {
     minLength: Math.max(2.5, style.spacing * quality.lineMinLength),
-    maxLines: Math.max(2000, Math.round(quality.maxStrokes * 0.6)),
+    maxLines: Math.min(40000, Math.max(2000, Math.round(quality.maxStrokes * 0.35))),
     claimRadius: quality.claimRadius,
   });
 

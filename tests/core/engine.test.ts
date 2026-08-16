@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TimelapseEngine, buildSimParams } from '../../src/core/engine';
+import { catchUpReserve } from '../../src/core/transition';
 import { STAGE_COUNT, Stage } from '../../src/core/schema';
 import type { DrawingPlan } from '../../src/core/schema';
 import { installRecordingSurface } from '../helpers/surface';
@@ -64,6 +65,27 @@ describe('時間配分', () => {
     for (let s = 0; s < STAGE_COUNT; s++) {
       const count = plan.stageOffset[s + 1] - plan.stageOffset[s];
       if (count > 0) expect(p.stageTicks[s]).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('どの工程にも「描き終えた姿を見せる」だけの持ち時間がある', () => {
+    for (const sec of [10, 30, 60]) {
+      const p = buildSimParams(plan, style('professional'), sec, 60, 1);
+      for (let s = 0; s < STAGE_COUNT; s++) {
+        if (p.stageTicks[s] <= 0) continue;
+        // 0.5 秒以上（30 tick）は確保される
+        expect(p.stageTicks[s], `${sec} 秒の工程 ${s}`).toBeGreaterThanOrEqual(30);
+      }
+    }
+  });
+
+  it('工程の終わりには手を止める余裕がある', () => {
+    const p = buildSimParams(plan, style('professional'), 30, 60, 1);
+    for (let s = 0; s < STAGE_COUNT; s++) {
+      if (p.stageTicks[s] <= 3) continue;
+      const reserve = catchUpReserve(p, s);
+      expect(reserve).toBeGreaterThanOrEqual(2);
+      expect(reserve).toBeLessThan(p.stageTicks[s]);
     }
   });
 

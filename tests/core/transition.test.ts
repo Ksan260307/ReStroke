@@ -12,7 +12,7 @@ import {
 } from '../../src/core/transition';
 import type { SimParams } from '../../src/core/transition';
 import { buildSimParams } from '../../src/core/engine';
-import { STAGE_COUNT } from '../../src/core/schema';
+import { STAGE_COUNT, Stage, baseIdentity, createStrokeTable, pushStroke } from '../../src/core/schema';
 import type { DrawingPlan } from '../../src/core/schema';
 import { buildPlan, sceneImage, solidImage, style } from '../helpers/fixtures';
 
@@ -186,6 +186,38 @@ describe('状態遷移', () => {
     }
     expect(state.tick).toBe(params.totalTicks);
     expect(state.cursor).toBe(plan.strokes.count);
+  });
+
+  it('本数が多く尺が短くても、1 本残らず描き切る', () => {
+    // 1 tick で大量に引く場面（短い尺 × 細かい粒度）で描き残しが出ないこと。
+    const count = 130000;
+    const strokes = createStrokeTable(count);
+    for (let i = 0; i < count; i++) {
+      pushStroke(strokes, {
+        x0: i % 100, y0: (i / 100) % 100, cx: i % 100, cy: (i / 100) % 100,
+        x1: (i % 100) + 1, y1: (i / 100) % 100,
+        width: 1, color: 0x808080, opacity: 255, pressure: 255,
+        duration: 1, stage: Stage.Finish, layer: 0, brush: 0,
+      });
+    }
+    const plan: DrawingPlan = {
+      width: 100, height: 100, sourceWidth: 100, sourceHeight: 100,
+      paper: 0xffffff, palette: new Uint32Array([0xffffff]), layers: [],
+      strokes, stageOffset: new Int32Array([0, 0, 0, 0, 0, 0, 0, count]),
+      identity: baseIdentity('bulk'),
+    };
+    const params = buildSimParams(plan, style('professional'), 1, 60, 3);
+    const r = runAll(plan, params);
+    expect(r.finalCursor).toBe(count);
+
+    // 最後の tick では、残っているものを本数に関わらず引き切る。
+    const prefix = buildWorkPrefix(plan);
+    const state = createSimState();
+    const ops = createPaintOps(64);
+    state.tick = params.totalTicks - 1;
+    stepSimulation(plan, params, prefix, state, ops);
+    expect(state.cursor).toBe(count);
+    expect(ops.count).toBe(count);
   });
 
   it('状態の複製と初期化が正しく働く', () => {

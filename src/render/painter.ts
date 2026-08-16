@@ -4,19 +4,23 @@
  * 状態遷移が出した描画命令を、そのままキャンバスへ写すだけの読み取り専用の層。
  * ここから状態を書き換えることはない。
  *
- * 軽量化の要点は「毎フレーム全部描き直さない」こと。キャンバスは塗り重ねの結果を
- * そのまま保持しているので、その tick で伸びた分の区間だけを追記すればよい。
- * 巻き戻すときだけ、キャッシュした途中経過から再計算する。
+ * 描画面は 2 枚に分ける。
  *
- * 描画面は透明で持ち、紙の色は画面へ出すときに下へ敷く。こうしておくと、下塗りを
- * 「すでに引いた線の下へ潜り込ませる」ことができ、線画が塗りで消えない。
+ *   色の面 … 下塗り・ベース・影・光・細部
+ *   線の面 … 当たり線・線画・仕上げの詰め（色の面の上に重なる）
  *
- * 仕上げの詰めでは、元画像そのものを絵の具として筆に乗せる。筆が通ったところは
- * 元画像の画素がそのまま置かれるので、塗り重ねだけで最後は元画像と一致する。
+ * こうしておくと、線を引き終えたあとに色を置いても線が消えない。実際の制作で
+ * 線画レイヤーを一番上に置くのと同じ考え方で、これがないと「線画を完成させてから
+ * 着色に移る」という流れが成立しない。
+ *
+ * 紙の色はどちらの面にも含めず、画面へ出すときに下へ敷く。
+ *
+ * 仕上げの詰めでは、元画像そのものを絵の具として筆に乗せる。筆が通ったところには
+ * 元画像の画素がそのまま置かれるので、塗り重ねるだけで最後は元画像と一致する。
  */
 
 import type { DrawingPlan } from '../core/schema';
-import { Brush, cssColor } from '../core/schema';
+import { Brush, Stage, cssColor } from '../core/schema';
 import type { PaintOps } from '../core/transition';
 import { pressureAt } from '../core/dynamics';
 import { clamp, lerp, rand01 } from '../core/rng';
@@ -42,16 +46,31 @@ export interface PainterOptions {
   source?: CanvasImageSource | null;
 }
 
+/** 途中経過の複製（色の面と線の面の対）。 */
+export interface PainterSnapshot {
+  color: Surface;
+  ink: Surface;
+}
+
 function context(c: Surface, alpha: boolean): Ctx2D {
   const ctx = c.getContext('2d', { alpha }) as Ctx2D | null;
   if (!ctx) throw new Error('キャンバスを初期化できませんでした');
   return ctx;
 }
 
+/** そのストロークがどちらの面に乗るか。 */
+export function surfaceOf(stage: number, brush: number): 'ink' | 'color' {
+  if (brush === Brush.Refine) return 'ink';
+  return stage === Stage.Rough || stage === Stage.LineArt ? 'ink' : 'color';
+}
+
 export class Painter {
-  /** 筆致を保持する面。紙の色は含まない（透明） */
+  /** 色の面（線の下） */
   readonly canvas: Surface;
+  /** 線の面（色の上） */
+  readonly ink: Surface;
   readonly ctx: Ctx2D;
+  readonly inkCtx: Ctx2D;
   readonly width: number;
   readonly height: number;
 
@@ -68,9 +87,13 @@ export class Painter {
     this.width = Math.max(2, Math.round(plan.width * opts.scale));
     this.height = Math.max(2, Math.round(plan.height * opts.scale));
     this.canvas = createSurface(this.width, this.height);
+    this.ink = createSurface(this.width, this.height);
     this.ctx = context(this.canvas, true);
-    this.ctx.lineCap = 'round';
-    this.ctx.lineJoin = 'round';
+    this.inkCtx = context(this.ink, true);
+    for (const ctx of [this.ctx, this.inkCtx]) {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    }
     if (opts.source) this.setSource(opts.source);
     this.clear();
   }
@@ -84,9 +107,9 @@ export class Painter {
     ctx.drawImage(source, 0, 0, this.width, this.height);
     this.source = surface;
     // 画素が 1 対 1 で対応する模様として持つ。筆で塗ると元画像がそのまま乗る。
-    const make = (this.ctx as CanvasRenderingContext2D).createPattern;
+    const make = (this.inkCtx as CanvasRenderingContext2D).createPattern;
     this.sourcePattern = typeof make === 'function'
-      ? make.call(this.ctx as CanvasRenderingContext2D, surface as CanvasImageSource, 'no-repeat')
+      ? make.call(this.inkCtx as CanvasRenderingContext2D, surface as CanvasImageSource, 'no-repeat')
       : null;
   }
 
@@ -96,10 +119,11 @@ export class Painter {
 
   /** 何も描いていない状態に戻す。 */
   clear(): void {
-    const ctx = this.ctx;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.clearRect(0, 0, this.width, this.height);
+    for (const ctx of [this.ctx, this.inkCtx]) {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.clearRect(0, 0, this.width, this.height);
+    }
   }
 
   /** 1 tick 分の描画命令を反映する。 */
@@ -108,20 +132,21 @@ export class Painter {
     for (let k = 0; k < ops.count; k++) {
       const i = ops.index[k];
       if (visibleLayers && visibleLayers[s.layer[i]] === 0) continue;
+      const ctx = surfaceOf(s.stage[i], s.brush[i]) === 'ink' ? this.inkCtx : this.ctx;
       if (s.brush[i] === Brush.Refine) {
         // 詰めの筆は引き終わった時点で一息に置く。
         // 途中で切って継ぎ足すと、継ぎ目に縁のぼかしが重なり、そこだけ 8bit の丸めで
         // 1 段階ずれる。元画像と最後まで一致させるには、一筆で置き切る必要がある。
         if (ops.to[k] < 1) continue;
-        this.drawSegment(i, 0, 1);
+        this.drawSegment(ctx, i, 0, 1);
         continue;
       }
-      this.drawSegment(i, ops.from[k], ops.to[k]);
+      this.drawSegment(ctx, i, ops.from[k], ops.to[k]);
     }
   }
 
   /** ストローク i の区間 [u0, u1] を描く。 */
-  private drawSegment(i: number, u0: number, u1: number): void {
+  private drawSegment(ctx: Ctx2D, i: number, u0: number, u1: number): void {
     const s = this.plan.strokes;
     const sc = this.opts.scale;
     const x0 = s.x0[i] * sc;
@@ -134,7 +159,6 @@ export class Painter {
     const baseW = Math.max(0.4, s.width[i] * sc);
     const alpha = s.opacity[i] / 255;
     const press = s.pressure[i] / 255;
-    const ctx = this.ctx;
 
     // 区間の長さから分割数を決める。短い区間で無駄に分割しない。
     const approx = (Math.hypot(cx - x0, cy - y0) + Math.hypot(x1 - cx, y1 - cy)) * (u1 - u0);
@@ -145,8 +169,8 @@ export class Painter {
 
     if (brush === Brush.Soft && this.opts.softness > 0) {
       // にじみは、細い芯と太い外周の重ね塗りで近似する（ぼかし処理より軽い）。
-      this.strokePath(i, x0, y0, cx, cy, x1, y1, u0, u1, steps, baseW * (1 + this.opts.softness * 1.6), alpha * 0.35, press, 0);
-      this.strokePath(i, x0, y0, cx, cy, x1, y1, u0, u1, steps, baseW, alpha * 0.75, press, 0);
+      this.strokePath(ctx, i, x0, y0, cx, cy, x1, y1, u0, u1, steps, baseW * (1 + this.opts.softness * 1.6), alpha * 0.35, press, 0);
+      this.strokePath(ctx, i, x0, y0, cx, cy, x1, y1, u0, u1, steps, baseW, alpha * 0.75, press, 0);
       return;
     }
 
@@ -155,23 +179,22 @@ export class Painter {
       for (let g = 0; g < n; g++) {
         const off = (rand01(i, g, 0x7a11) - 0.5) * baseW * this.opts.grain * 1.4;
         this.strokePath(
-          i, x0 + off, y0 + off * 0.3, cx + off, cy + off * 0.3, x1 + off, y1 + off * 0.3,
+          ctx, i, x0 + off, y0 + off * 0.3, cx + off, cy + off * 0.3, x1 + off, y1 + off * 0.3,
           u0, u1, steps, baseW * 0.55, alpha * 0.7, press, taper,
         );
       }
       return;
     }
 
-    this.strokePath(i, x0, y0, cx, cy, x1, y1, u0, u1, steps, baseW, alpha, press, taper);
+    this.strokePath(ctx, i, x0, y0, cx, cy, x1, y1, u0, u1, steps, baseW, alpha, press, taper);
   }
 
   private strokePath(
-    i: number,
+    ctx: Ctx2D, i: number,
     x0: number, y0: number, cx: number, cy: number, x1: number, y1: number,
     u0: number, u1: number, steps: number,
     baseW: number, alpha: number, press: number, taper: number,
   ): void {
-    const ctx = this.ctx;
     const brush = this.plan.strokes.brush[i];
     // 詰めの筆は元画像を絵の具にする。用意が無ければ拾った色で代用する。
     if (brush === Brush.Refine && this.sourcePattern) {
@@ -214,30 +237,37 @@ export class Painter {
   }
 
   /** 途中経過の複製を作る（巻き戻し高速化用のキャッシュ）。 */
-  snapshot(): Surface {
-    const c = createSurface(this.width, this.height);
-    const ctx = context(c, true);
-    ctx.clearRect(0, 0, this.width, this.height);
-    ctx.drawImage(this.canvas as CanvasImageSource, 0, 0);
-    return c;
+  snapshot(): PainterSnapshot {
+    const copy = (src: Surface): Surface => {
+      const c = createSurface(this.width, this.height);
+      const ctx = context(c, true);
+      ctx.clearRect(0, 0, this.width, this.height);
+      ctx.drawImage(src as CanvasImageSource, 0, 0);
+      return c;
+    };
+    return { color: copy(this.canvas), ink: copy(this.ink) };
   }
 
   /** キャッシュした途中経過へ戻す。 */
-  restore(snap: Surface): void {
-    const ctx = this.ctx;
-    ctx.globalCompositeOperation = 'copy';
-    ctx.globalAlpha = 1;
-    ctx.drawImage(snap as CanvasImageSource, 0, 0);
-    ctx.globalCompositeOperation = 'source-over';
+  restore(snap: PainterSnapshot): void {
+    const put = (ctx: Ctx2D, src: Surface): void => {
+      ctx.globalCompositeOperation = 'copy';
+      ctx.globalAlpha = 1;
+      ctx.drawImage(src as CanvasImageSource, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+    };
+    put(this.ctx, snap.color);
+    put(this.inkCtx, snap.ink);
   }
 
-  /** 紙を敷いてから筆致を重ねる。 */
+  /** 紙を敷き、色の面、線の面の順に重ねる。 */
   private paintInto(ctx: Ctx2D, dw: number, dh: number): void {
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
     ctx.fillStyle = cssColor(this.plan.paper, 1);
     ctx.fillRect(0, 0, dw, dh);
     ctx.drawImage(this.canvas as CanvasImageSource, 0, 0, dw, dh);
+    ctx.drawImage(this.ink as CanvasImageSource, 0, 0, dw, dh);
   }
 
   /** 表示用キャンバスへ転送する。 */
@@ -281,10 +311,9 @@ export class Painter {
 
 /** 筆ごとの重ね方。 */
 function compositeFor(brush: number, opts: PainterOptions): GlobalCompositeOperation {
-  // 下塗りはすでに置かれた線の下へ潜り込ませる。
-  if (brush === Brush.Under) return 'destination-over';
-  // 詰めは元の色へ寄せるためのものなので、画風の合成方法に関わらず上書きする。
-  if (brush === Brush.Refine) return 'source-over';
+  // 下塗りと詰めは、画風の合成方法に関わらず素直に置く。
+  // 乗算のまま重ねると、置きたい色より暗くなってしまう。
+  if (brush === Brush.Under || brush === Brush.Refine) return 'source-over';
   return brush === Brush.Flat ? opts.fillComposite : opts.inkComposite;
 }
 

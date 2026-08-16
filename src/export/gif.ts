@@ -21,6 +21,8 @@ export class GifWriter {
   private table: Uint8Array;
   private opts: GifOptions;
   private started = false;
+  /** フレームごとの色番号。毎回確保せず使い回す */
+  private indices: Uint8Array;
 
   constructor(options: GifOptions) {
     this.opts = options;
@@ -28,6 +30,7 @@ export class GifWriter {
     const built = buildColorTable(options.palette);
     this.table = built.table;
     this.lut = built.lut;
+    this.indices = new Uint8Array(options.width * options.height);
   }
 
   private ensure(n: number): void {
@@ -79,7 +82,7 @@ export class GifWriter {
   addFrame(rgba: Uint8ClampedArray): void {
     if (!this.started) this.header();
     const n = this.opts.width * this.opts.height;
-    const indices = new Uint8Array(n);
+    const indices = this.indices;
     for (let i = 0, p = 0; i < n; i++, p += 4) {
       indices[i] =
         this.lut[

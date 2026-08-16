@@ -185,6 +185,11 @@ ui.fileInput.addEventListener('change', () => {
 });
 
 async function loadFile(file: File): Promise<void> {
+  // 生成や書き出しの最中に画像を差し替えると、処理中の画像を閉じてしまう。
+  if (state.busy) {
+    showError('処理が終わってから画像を差し替えてください');
+    return;
+  }
   clearError();
   if (!file.type.startsWith('image/')) {
     showError('画像ファイルを選んでください');

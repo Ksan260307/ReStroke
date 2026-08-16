@@ -107,11 +107,17 @@ export function buildWorkPrefix(plan: DrawingPlan): Float64Array {
   return prefix;
 }
 
-/** 工程の終わりに残す追いつき用の余裕（tick）。 */
+/**
+ * 工程の終わりに残す余裕（tick）。
+ *
+ * 二つの役割がある。ひとつは、ゆらぎや一息で遅れたぶんをここで取り戻すこと。
+ * もうひとつは、描き終えた工程の姿をしばらく見せること。人の作業でも、ラフを
+ * 引き終えたら手を止めて全体を眺めてから次へ進む。
+ */
 export function catchUpReserve(params: SimParams, stage: number): number {
   const len = params.stageTicks[stage];
-  if (len <= 2) return 0;
-  return Math.min(Math.max(1, Math.round(len * 0.12)), 24, len - 1);
+  if (len <= 3) return 0;
+  return Math.min(Math.max(2, Math.round(len * 0.2)), 45, len - 2);
 }
 
 /** tick が属する工程を返す。 */
@@ -176,8 +182,11 @@ export function stepSimulation(
   }
 
   let completedThisTick = 0;
+  // 空回りへの保険。1 tick で全ストロークを引き切る場面（最後の tick）があるので、
+  // 上限は本数に比例させる。固定値にすると、本数が多いときに描き残しが出る。
   let guard = 0;
-  while (budget > 1e-6 && state.cursor < strokeEnd && guard++ < 100000) {
+  const guardLimit = strokes.count * 2 + 64;
+  while (budget > 1e-6 && state.cursor < strokeEnd && guard++ < guardLimit) {
     const i = state.cursor;
     const d = Math.max(1, strokes.duration[i]);
     const remain = (1 - state.progress) * d;

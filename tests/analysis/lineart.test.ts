@@ -28,12 +28,22 @@ describe('線画の抽出', () => {
     expect(Math.max(...lines.map((l) => l.length))).toBeGreaterThan(img.height * 0.5);
   });
 
-  it('長い線から順に並ぶ（主要な形を先に描く）', () => {
+  it('主要な形から先に、近いところを続けて描く', () => {
     const edges = detectEdges(sceneImage().lum, 320, 240, 1);
     const lines = traceLines(edges);
+    expect(lines.length).toBeGreaterThan(6);
+    // 前半の線は後半より長い（大きな形が先）
+    const half = Math.floor(lines.length / 2);
+    const mean = (a: typeof lines): number => a.reduce((s, l) => s + l.length, 0) / a.length;
+    expect(mean(lines.slice(0, half))).toBeGreaterThan(mean(lines.slice(half)));
+
+    // 続けて引く線どうしは近い（ペンが画面中を飛び回らない）
+    let jumps = 0;
     for (let i = 1; i < lines.length; i++) {
-      expect(lines[i - 1].length).toBeGreaterThanOrEqual(lines[i].length);
+      const d = Math.hypot(lines[i].pts[0] - lines[i - 1].pts[0], lines[i].pts[1] - lines[i - 1].pts[1]);
+      if (d > 320 * 0.6) jumps++;
     }
+    expect(jumps / lines.length).toBeLessThan(0.25);
   });
 
   it('点列は画像の内側に収まる', () => {

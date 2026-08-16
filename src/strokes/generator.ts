@@ -111,7 +111,9 @@ function build(input: GenerateInput, spacing: number): BuildResult {
     const nx = len > 1e-3 ? -(y1 - y0) / len : 0;
     const ny = len > 1e-3 ? (x1 - x0) / len : 0;
     const k = randSigned(seed ^ 0x2f1b, serial, 0x77) * bow * Math.min(len * 0.35, 14);
-    const duration = clamp(Math.round(len / style.speed) + 1, 1, 255);
+    // 1 本ごとに運びの速さを変える。全部が同じ速度で引かれると機械の動きに見える。
+    const pace = 0.75 + rand01(seed ^ 0x5a3, serial, 0x2d) * 0.6;
+    const duration = clamp(Math.round(len / (style.speed * pace)) + 1, 1, 255);
     if (table.count >= limit) {
       overflow = true;
       serial++;
@@ -183,10 +185,19 @@ function build(input: GenerateInput, spacing: number): BuildResult {
       const yy = Math.min(h - 1, y);
       // 行ごとに継ぎ目の位置をずらす。そろえると縦の筋が見えてしまう。
       const offset = -runLen * rand01(seed ^ 0x4b1, row);
+      // 行ごとに向きを入れ替えて往復させる。
+      const back = row % 2 === 1;
+      const spans: number[] = [];
       for (let x = offset; x < w; x += runLen) {
-        const x0 = Math.max(0, x);
-        const x1 = Math.min(w - 1, x + runLen);
-        if (x1 - x0 < gap * 0.5) continue;
+        spans.push(Math.max(0, x), Math.min(w - 1, x + runLen));
+      }
+      for (let k = 0; k < spans.length; k += 2) {
+        const idx = back ? spans.length - 2 - k : k;
+        const a = spans[idx];
+        const b = spans[idx + 1];
+        const x0 = back ? b : a;
+        const x1 = back ? a : b;
+        if (Math.abs(b - a) < gap * 0.5) continue;
         // 区間の平均色を取る（1 点だけ見ると粒に引っぱられる）。
         let cr = 0, cg = 0, cb = 0, n = 0;
         for (let t = 0; t <= 6; t++) {
@@ -245,7 +256,11 @@ function build(input: GenerateInput, spacing: number): BuildResult {
       }
 
       const offset = (gap * (pass + 0.5)) / passes;
-      for (let u = uMin + offset; u <= uMax; u += gap) {
+      const runs: number[] = [];
+      let line = 0;
+      for (let u = uMin + offset; u <= uMax; u += gap, line++) {
+        // その走査線が領域を横切っている区間をすべて集める。
+        runs.length = 0;
         let runStart = Number.NaN;
         let prevV = vMin;
         for (let v = vMin; v <= vMax + sampleStep; v += sampleStep) {
@@ -258,19 +273,27 @@ function build(input: GenerateInput, spacing: number): BuildResult {
           if (inside) {
             if (Number.isNaN(runStart)) runStart = v;
             else if (v - runStart >= lenCap) {
-              flush(runStart, v);
+              runs.push(runStart, v);
               runStart = v;
             }
           } else if (!Number.isNaN(runStart)) {
-            flush(runStart, prevV);
+            runs.push(runStart, prevV);
             runStart = Number.NaN;
           }
           prevV = v;
         }
-        if (!Number.isNaN(runStart)) flush(runStart, vMax);
+        if (!Number.isNaN(runStart)) runs.push(runStart, vMax);
 
-        function flush(v0: number, v1: number): void {
-          if (v1 - v0 < gap * 0.35) return;
+        // 走査線ごとに往復させる。復路は並びも向きも逆にして、前の筆を置き終えた
+        // ところから次を置き始める。手を大きく戻さずに塗り進める運びになる。
+        const back = line % 2 === 1;
+        for (let k = 0; k < runs.length; k += 2) {
+          const idx = back ? runs.length - 2 - k : k;
+          const vFrom = runs[idx];
+          const vTo = runs[idx + 1];
+          if (vTo - vFrom < gap * 0.35) continue;
+          const v0 = back ? vTo : vFrom;
+          const v1 = back ? vFrom : vTo;
           const jx = randSigned(seed ^ 0x1234, serial, 1) * style.jitter;
           const jy = randSigned(seed ^ 0x5678, serial, 2) * style.jitter;
           const x0 = r.cx + u * nx + v0 * dx + jx;
@@ -534,8 +557,9 @@ function build(input: GenerateInput, spacing: number): BuildResult {
     }
 
     // 情報量の多い順に、予算のぶんだけ選ぶ。型付き配列のまま並べ替える。
+    // 同点は番号順に倒す。並べ替えの実装任せにすると、環境によって結果が変わりうる。
     const take = Math.min(budget, total);
-    order.sort((a, b) => score[b] - score[a]);
+    order.sort((a, b) => score[b] - score[a] || a - b);
     const picked = order.subarray(0, take);
     const maxScore = take > 0 ? score[picked[0]] : 1;
 
@@ -589,7 +613,9 @@ function build(input: GenerateInput, spacing: number): BuildResult {
     if (budget <= 4) return;
     const segLen = Math.max(8, spacing * 4);
     const perRow = Math.ceil((w + 2) / segLen);
-    const rowCount = Math.max(1, Math.min(Math.floor(budget / perRow), Math.ceil(h * 2)));
+    // 1 行ぶんも置けない予算なら、はみ出して取り置きを食うより何もしない方がよい。
+    const rowCount = Math.min(Math.floor(budget / perRow), Math.ceil(h * 2));
+    if (rowCount < 1) return;
     const gap = h / rowCount;
     const width = gap * 2.2 + 2;
 
@@ -653,18 +679,44 @@ function bitReverse(v: number, n: number): number {
   return out;
 }
 
-function groupRegions(seg: Segmentation, assign: LayerAssignment, minArea: number): Region[][] {
+/**
+ * 工程ごとに領域をまとめ、塗る順に並べる。
+ *
+ * 広い面から先に塗るのが基本だが、面積の順にそのまま並べると筆が画面中を
+ * 行ったり来たりする。面積で 3 段の帯に分け、その中では画面の上から下・左から右へ
+ * 進むようにする。手を大きく動かさずに近いところから片づけていく運びになる。
+ */
+function groupRegions(
+  seg: Segmentation,
+  assign: LayerAssignment,
+  minArea: number,
+): Region[][] {
   const byStage: Region[][] = Array.from({ length: STAGE_COUNT }, () => []);
   for (const r of seg.regions) {
     if (r.area < minArea) continue; // 画素が割り当てられていないので塗れない
     byStage[assign.regionStage[r.id]].push(r);
   }
+  const band = seg.height / 3;
   for (let s = 0; s < STAGE_COUNT; s++) {
-    // 広い面から先に塗る。数が多すぎる場合は上位だけを対象にする。
-    byStage[s].sort((a, b) => b.area - a.area);
+    // 同点は領域番号で倒し、並べ替えの実装によらず同じ結果になるようにする。
+    byStage[s].sort((a, b) => b.area - a.area || a.id - b.id);
     if (byStage[s].length > MAX_REGIONS_PER_STAGE) {
       byStage[s] = byStage[s].slice(0, MAX_REGIONS_PER_STAGE);
     }
+    const list = byStage[s];
+    if (list.length < 3) continue;
+    const largest = list[0].area;
+    const tier = (r: Region): number =>
+      largest <= 0 ? 0 : Math.min(2, Math.floor((1 - r.area / largest) * 3));
+    list.sort((a, b) => {
+      const ta = tier(a);
+      const tb = tier(b);
+      if (ta !== tb) return ta - tb;
+      const ra = Math.floor(a.cy / band);
+      const rb = Math.floor(b.cy / band);
+      if (ra !== rb) return ra - rb;
+      return a.cx - b.cx || a.id - b.id;
+    });
   }
   return byStage;
 }

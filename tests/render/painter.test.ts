@@ -11,12 +11,12 @@ import type { RecordingContext, RecordingHandle } from '../helpers/surface';
 
 const PAPER = rgb(250, 248, 244);
 
-function makePlan(brush = Brush.Flat): DrawingPlan {
+function makePlan(brush = Brush.Flat, stage: number = Stage.Base): DrawingPlan {
   const strokes = createStrokeTable(4);
   const base = {
     x0: 10, y0: 20, cx: 30, cy: 20, x1: 50, y1: 20,
     width: 4, color: rgb(200, 40, 60), opacity: 128, pressure: 255,
-    duration: 2, stage: Stage.Base, layer: 0, brush,
+    duration: 2, stage, layer: 0, brush,
   };
   pushStroke(strokes, base);
   pushStroke(strokes, { ...base, y0: 40, cy: 40, y1: 40, color: rgb(10, 220, 30), layer: 1 });
@@ -47,6 +47,7 @@ function opsFor(indices: number[], from = 0, to = 1): PaintOps {
 
 let handle: RecordingHandle;
 const ctxOf = (p: Painter): RecordingContext => p.ctx as unknown as RecordingContext;
+const inkOf = (p: Painter): RecordingContext => p.inkCtx as unknown as RecordingContext;
 
 beforeEach(() => {
   handle = installRecordingSurface();
@@ -157,42 +158,77 @@ describe('描画', () => {
     expect(ctxOf(p).calls.find((c) => c.op === 'stroke')!.state.composite).toBe('multiply');
   });
 
-  it('複製は本体を写し、復元は複製から書き戻す', () => {
+  it('複製は 2 つの面を写し、復元は複製から書き戻す', () => {
     const p = new Painter(makePlan(), options());
     const snap = p.snapshot();
-    expect(snap.width).toBe(p.width);
-    expect(snap.height).toBe(p.height);
-    // 複製側には本体からの転写が記録されている
-    const intoSnap = (snap.getContext() as RecordingContext).calls.filter((c) => c.op === 'drawImage');
-    expect(intoSnap).toHaveLength(1);
-    expect(intoSnap[0].args[0]).toBe(p.canvas);
+    expect(snap.color.width).toBe(p.width);
+    expect(snap.ink.height).toBe(p.height);
+    // 複製側にはそれぞれの面からの転写が記録されている
+    const from = (s: typeof snap.color): unknown =>
+      (s.getContext() as RecordingContext).calls.filter((c) => c.op === 'drawImage')[0].args[0];
+    expect(from(snap.color)).toBe(p.canvas);
+    expect(from(snap.ink)).toBe(p.ink);
 
     ctxOf(p).drain();
+    inkOf(p).drain();
     p.restore(snap);
-    const draws = ctxOf(p).calls.filter((c) => c.op === 'drawImage');
-    expect(draws).toHaveLength(1);
-    expect(draws[0].args[0]).toBe(snap);
-    expect(draws[0].state.globalAlpha).toBe(1);
+    const colorDraw = ctxOf(p).calls.filter((c) => c.op === 'drawImage');
+    const inkDraw = inkOf(p).calls.filter((c) => c.op === 'drawImage');
+    expect(colorDraw).toHaveLength(1);
+    expect(colorDraw[0].args[0]).toBe(snap.color);
+    expect(inkDraw).toHaveLength(1);
+    expect(inkDraw[0].args[0]).toBe(snap.ink);
+  });
+
+  it('線は色の面より上に置かれる', () => {
+    const p = new Painter(makePlan(), options());
+    ctxOf(p).drain();
+    inkOf(p).drain();
+    // ベースカラー工程は色の面へ
+    p.apply(opsFor([0]), null);
+    expect(ctxOf(p).calls.filter((c) => c.op === 'stroke')).toHaveLength(1);
+    expect(inkOf(p).calls.filter((c) => c.op === 'stroke')).toHaveLength(0);
+
+    // 表示は 紙 → 色 → 線 の順
+    const dest = handle.surfaces[0].ctx;
+    dest.calls = [];
+    p.present(dest as unknown as CanvasRenderingContext2D, 100, 80);
+    const ops = dest.calls.filter((c) => c.op === 'fillRect' || c.op === 'drawImage');
+    expect(ops.map((c) => c.op)).toEqual(['fillRect', 'drawImage', 'drawImage']);
+    expect(ops[1].args[0]).toBe(p.canvas);
+    expect(ops[2].args[0]).toBe(p.ink);
+  });
+
+  it('当たり線と線画は線の面へ置かれる', () => {
+    for (const stage of [Stage.Rough, Stage.LineArt]) {
+      const plan = makePlan(Brush.Round, stage);
+      const p = new Painter(plan, options());
+      ctxOf(p).drain();
+      inkOf(p).drain();
+      p.apply(opsFor([0]), null);
+      expect(inkOf(p).calls.filter((c) => c.op === 'stroke'), `工程 ${stage}`).toHaveLength(1);
+      expect(ctxOf(p).calls.filter((c) => c.op === 'stroke')).toHaveLength(0);
+    }
   });
 });
 
 describe('下塗りと詰め', () => {
   const source = { fake: 'source' } as unknown as CanvasImageSource;
 
-  it('下塗りは既にある線の下へ潜り込ませる', () => {
-    const p = new Painter(makePlan(Brush.Under), options());
+  it('下塗りは画風の合成方法に関わらず素直に置く', () => {
+    const p = new Painter(makePlan(Brush.Under), options({ fillComposite: 'multiply' }));
     ctxOf(p).drain();
     p.apply(opsFor([0]), null);
     const stroke = ctxOf(p).calls.find((c) => c.op === 'stroke')!;
-    expect(stroke.state.composite).toBe('destination-over');
+    expect(stroke.state.composite).toBe('source-over');
   });
 
-  it('詰めの筆は元画像を絵の具にする', () => {
+  it('詰めの筆は元画像を絵の具にし、線の面へ置く', () => {
     const p = new Painter(makePlan(Brush.Refine), options({ source }));
     expect(p.hasSource).toBe(true);
-    ctxOf(p).drain();
+    inkOf(p).drain();
     p.apply(opsFor([0]), null);
-    const stroke = ctxOf(p).calls.find((c) => c.op === 'stroke')!;
+    const stroke = inkOf(p).calls.find((c) => c.op === 'stroke')!;
     expect(stroke.state.composite).toBe('source-over');
     // 単色ではなく模様（元画像）で塗っている
     expect(stroke.state.strokeStyle).toContain('pattern');
@@ -202,23 +238,23 @@ describe('下塗りと詰め', () => {
   it('元画像が無ければ拾った色で代用する', () => {
     const p = new Painter(makePlan(Brush.Refine), options());
     expect(p.hasSource).toBe(false);
-    ctxOf(p).drain();
+    inkOf(p).drain();
     p.apply(opsFor([0]), null);
-    const stroke = ctxOf(p).calls.find((c) => c.op === 'stroke')!;
+    const stroke = inkOf(p).calls.find((c) => c.op === 'stroke')!;
     expect(stroke.state.strokeStyle).toBe(cssColor(rgb(200, 40, 60), 128 / 255));
   });
 
   it('詰めの筆は引き終わるまで置かれず、置くときは一筆で通す', () => {
     const p = new Painter(makePlan(Brush.Refine), options({ source }));
-    ctxOf(p).drain();
+    inkOf(p).drain();
     // 途中の区間では何も置かない
     p.apply(opsFor([0], 0, 0.4), null);
     p.apply(opsFor([0], 0.4, 0.8), null);
-    expect(ctxOf(p).calls.filter((c) => c.op === 'stroke')).toHaveLength(0);
+    expect(inkOf(p).calls.filter((c) => c.op === 'stroke')).toHaveLength(0);
 
     // 引き終わった時点で、始点から終点までを一度に置く
     p.apply(opsFor([0], 0.8, 1), null);
-    const calls = ctxOf(p).calls;
+    const calls = inkOf(p).calls;
     expect(calls.filter((c) => c.op === 'stroke')).toHaveLength(1);
     const move = calls.find((c) => c.op === 'moveTo')!.args as number[];
     const lines = calls.filter((c) => c.op === 'lineTo');
@@ -229,26 +265,26 @@ describe('下塗りと詰め', () => {
 
   it('画風が乗算でも詰めは上書きになる', () => {
     const p = new Painter(makePlan(Brush.Refine), options({ source, fillComposite: 'multiply', inkComposite: 'multiply' }));
-    ctxOf(p).drain();
+    inkOf(p).drain();
     p.apply(opsFor([0]), null);
-    expect(ctxOf(p).calls.find((c) => c.op === 'stroke')!.state.composite).toBe('source-over');
+    expect(inkOf(p).calls.find((c) => c.op === 'stroke')!.state.composite).toBe('source-over');
   });
 
-  it('書き出し用の面には紙が敷かれる', () => {
+  it('書き出し用の面には紙と 2 つの面が重なる', () => {
     const p = new Painter(makePlan(), options({ source }));
     const out = p.output();
     expect(out).not.toBe(p.canvas);
     const ctx = out.getContext() as RecordingContext;
     expect(ctx.calls.filter((c) => c.op === 'fillRect')).toHaveLength(1);
-    expect(ctx.calls.filter((c) => c.op === 'drawImage')).toHaveLength(1);
+    expect(ctx.calls.filter((c) => c.op === 'drawImage')).toHaveLength(2);
   });
 
-  it('縮小して取り出すときも紙が敷かれる', () => {
+  it('縮小して取り出すときも紙と 2 つの面が重なる', () => {
     const p = new Painter(makePlan(), options({ source }));
     const data = p.readScaled(50, 40);
     expect(data.data.length).toBe(50 * 40 * 4);
     const scratch = handle.surfaces[handle.surfaces.length - 1].ctx;
     expect(scratch.calls.filter((c) => c.op === 'fillRect')).toHaveLength(1);
-    expect(scratch.calls.filter((c) => c.op === 'drawImage')).toHaveLength(1);
+    expect(scratch.calls.filter((c) => c.op === 'drawImage')).toHaveLength(2);
   });
 });
